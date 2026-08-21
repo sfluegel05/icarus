@@ -1,0 +1,25 @@
+# Third-party runtime dependencies for ICaRuS.
+# Versions are the reference environment (Python 3.11+); relax if needed, but keep
+# rdkit close, since molecules.pkl contains pickled RDKit Mol objects.
+#
+# This list does NOT cover:
+#   - the three LOCAL packages, installed from their sibling checkouts:
+#       pip install -e ../python-chebi-utils      # chebi_utils
+#       pip install -e ../chebILP                  # chebILP
+#       pip install -e ../popper-sfluegel          # popper  (ILP engine)
+#   - the two ChEBI data files (see README → Running on another system).
+
+starlette==1.1.0
+uvicorn==0.48.0
+rdkit==2025.9.6
+pandas==3.0.1
+networkx==3.6.1
+clingo==5.8.0
+xclingo==2.0b14
+pillow==12.1.1
+
+# Pulled in by chebi_utils (listed so a plain venv resolves them):
+numpy==2.4.3
+scikit-learn==1.8.0
+chembl_structure_pipeline==1.2.4
+fastobo==0.14.1

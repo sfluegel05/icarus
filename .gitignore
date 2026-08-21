@@ -1,0 +1,16 @@
+# Runtime-generated data (fingerprint cache + ILP problem files) — all rebuilt on demand
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.wslvenv/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

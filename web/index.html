@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ICaRuS — Interactive ChemicAl RUle System</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>ICaRuS <span class="subtitle">Interactive ChemicAl RUle System</span></h1>
+    <div class="header-actions">
+      <span id="counts" class="counts"></span>
+      <button id="reset-btn" class="ghost">Reset session</button>
+    </div>
+  </header>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <main>
+    <!-- STEP 1: EXAMPLES -->
+    <section class="card">
+      <h2>1 · Examples</h2>
+
+      <div class="class-picker">
+        <label>Seed from a ChEBI class (optional)</label>
+        <div class="class-row">
+          <div class="autocomplete">
+            <input id="class-search" type="text" placeholder="Search ChEBI class by name or id (e.g. steroid, 35341)" autocomplete="off">
+            <div id="class-results" class="ac-results hidden"></div>
+          </div>
+          <label class="mini">pos <input id="max-pos" type="number" value="8" min="1" max="50"></label>
+          <label class="mini">neg <input id="max-neg" type="number" value="8" min="1" max="50"></label>
+          <button id="fill-btn" disabled>Fill examples</button>
+        </div>
+        <div id="selected-class" class="selected-class"></div>
+      </div>
+
+      <div class="examples-grid">
+        <div class="example-col">
+          <h3 class="pos-head">Positive <span id="pos-count" class="pill">0</span></h3>
+          <div class="add-box">
+            <textarea id="pos-input" rows="2" placeholder="Add SMILES / InChI (one per line)"></textarea>
+            <button data-label="pos" class="add-mol">Add +</button>
+          </div>
+          <div id="pos-list" class="struct-grid"></div>
+        </div>
+        <div class="example-col">
+          <h3 class="neg-head">Negative <span id="neg-count" class="pill">0</span></h3>
+          <div class="add-box">
+            <textarea id="neg-input" rows="2" placeholder="Add SMILES / InChI (one per line)"></textarea>
+            <button data-label="neg" class="add-mol">Add −</button>
+          </div>
+          <div id="neg-list" class="struct-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 2: SUGGESTIONS (one-by-one) -->
+    <section class="card">
+      <h2>2 · Suggested molecules <span class="muted">(fingerprint similarity to positives)</span></h2>
+      <div class="row">
+        <label class="mini">fetch <input id="suggest-n" type="number" value="6" min="1" max="30"></label>
+        <button id="suggest-btn">Find similar molecules</button>
+        <span id="suggest-progress" class="muted"></span>
+      </div>
+
+      <div id="tinder" class="tinder hidden">
+        <div class="tinder-card">
+          <div class="tinder-meta-top">
+            <span id="t-sim" class="t-sim"></span>
+            <span id="t-pred" class="t-pred"></span>
+          </div>
+          <div id="t-struct" class="t-struct"></div>
+          <div class="tinder-secondary">
+            <div id="t-name" class="t-name"></div>
+            <div id="t-id" class="t-id"></div>
+            <div id="t-def" class="t-def"></div>
+          </div>
+        </div>
+        <div class="tinder-actions">
+          <button id="t-neg" class="btn-neg big">− Negative</button>
+          <button id="t-skip" class="ghost big">Skip →</button>
+          <button id="t-pos" class="btn-pos big">+ Positive</button>
+        </div>
+      </div>
+      <div id="tinder-empty" class="muted"></div>
+    </section>
+
+    <!-- STEP 3: LEARN & RULE -->
+    <section class="card">
+      <h2>3 · Learn a rule</h2>
+      <div class="row">
+        <label class="mini">timeout&nbsp;s <input id="timeout" type="number" value="20" min="5" max="120"></label>
+        <button id="learn-btn">Learn rule with Popper</button>
+        <span id="learn-status" class="muted"></span>
+      </div>
+
+      <div id="learn-progress" class="learn-progress hidden">
+        <div class="lp-head">
+          <span class="lp-title">Popper output</span>
+          <button id="toggle-log" class="linkbtn">show full output</button>
+        </div>
+        <pre id="learn-tail" class="log-view"></pre>
+        <pre id="learn-full" class="log-view full hidden"></pre>
+      </div>
+
+      <div id="rule-area" class="hidden">
+        <label class="rule-label">Hypothesis <span class="muted">(edit and apply to see what changes)</span></label>
+        <div class="rule-split">
+          <textarea id="rule-text" rows="4" class="rule-text"></textarea>
+          <div class="rule-nl-box">
+            <div class="rule-nl-label">In words</div>
+            <div id="rule-nl" class="rule-nl"></div>
+          </div>
+        </div>
+        <div class="row">
+          <button id="apply-rule-btn">Apply edited rule</button>
+          <button id="revert-rule-btn" class="ghost">Revert to learned</button>
+          <span id="edited-flag" class="muted"></span>
+        </div>
+
+        <div id="confusion" class="confusion"></div>
+        <div id="mismatch-area"></div>
+        <div id="change-area"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <button id="modal-close" class="modal-close">×</button>
+      <div id="modal-struct" class="modal-struct"></div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="explain-modal" class="modal hidden">
+    <div class="modal-box">
+      <button id="explain-close" class="modal-close">×</button>
+      <h3 id="explain-title">Why is this positive?</h3>
+      <div id="explain-content">
+        <div class="muted">Building explanation…</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

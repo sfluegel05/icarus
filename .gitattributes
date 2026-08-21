@@ -1,0 +1,3 @@
+# This project runs under WSL/Linux; keep LF endings so run.sh and other scripts
+# are not broken by CRLF on checkout.
+* text=auto eol=lf

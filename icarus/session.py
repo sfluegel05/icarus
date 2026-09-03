@@ -8,6 +8,7 @@ edits can be diffed.
 
 import itertools
 import threading
+import time
 
 from chebi_utils.read_molecule import smiles_or_inchi_to_mol
 
@@ -54,6 +55,38 @@ class Molecule:
         }
 
 
+class RuleEntry:
+    """One rule in the session's history.
+
+    Created whenever a rule is learned (``origin`` = the backend: ``popper`` /
+    ``aleph`` / ``llm``) or a hand-edited rule is applied (``origin`` = ``edited``).
+    ``confusion`` is the {TP,FP,TN,FN} matrix computed at creation (or the last
+    re-evaluation); ``signature`` snapshots the labelled example set it was scored
+    against, so a later change to the examples can be flagged as making it stale.
+    """
+
+    __slots__ = ("id", "origin", "rule", "confusion", "signature", "created_at")
+
+    def __init__(self, rid, origin, rule, confusion, signature, created_at):
+        self.id = rid
+        self.origin = origin
+        self.rule = rule
+        self.confusion = confusion            # {"TP","FP","TN","FN"} or None
+        self.signature = signature            # labelled-set snapshot when scored
+        self.created_at = created_at
+
+    def to_dict(self, current_signature):
+        return {
+            "id": self.id,
+            "origin": self.origin,
+            "rule": self.rule,
+            "confusion": self.confusion,
+            "created_at": self.created_at,
+            # Outdated if the labelled examples changed since this was scored.
+            "stale": self.confusion is not None and self.signature != current_signature,
+        }
+
+
 class Session:
     def __init__(self):
         self.lock = threading.Lock()
@@ -61,11 +94,18 @@ class Session:
         self._counter = itertools.count(1)
         # Seen SMILES -> molecule id, to avoid duplicates.
         self._by_smiles: dict[str, str] = {}
-        # Hypothesis state.
-        self.learned_rule: str | None = None
-        self.current_rule: str | None = None  # learned or hand-edited
+        # Hypothesis history: every learned/edited rule is kept; one is selected.
+        self.rule_history: list[RuleEntry] = []
+        self.selected_rule_id: str | None = None
+        self._rule_counter = itertools.count(1)
         # mol_id -> bool prediction, from the last evaluation.
         self.last_predictions: dict[str, bool] = {}
+        # Concept description shown to the LLM: name + the (editable) definition
+        # text, seeded from a ChEBI class when one is used. ``concept_chebi_id`` ties
+        # the LLM pipeline's library entries to that class for reuse.
+        self.concept_name: str | None = None
+        self.concept_chebi_id: str | None = None
+        self.concept_definition: str | None = None
 
     # ── molecule management ────────────────────────────────────────────────
     def _new_id(self) -> str:
@@ -158,13 +198,64 @@ class Session:
     def positives(self) -> list[Molecule]:
         return [m for m in self.molecules.values() if m.label == "pos"]
 
+    # ── rule history ───────────────────────────────────────────────────────
+    def labeled_signature(self) -> tuple:
+        """A snapshot of the labelled example set (id + label), used to detect
+        when a stored confusion matrix has gone stale."""
+        return tuple(sorted((m.id, m.label) for m in self.labeled()))
+
+    @property
+    def current_rule(self) -> str | None:
+        e = self.selected_entry()
+        return e.rule if e else None
+
+    def selected_entry(self) -> "RuleEntry | None":
+        if self.selected_rule_id is None:
+            return None
+        for e in self.rule_history:
+            if e.id == self.selected_rule_id:
+                return e
+        return None
+
+    def add_rule(self, origin: str, rule: str, confusion: dict | None = None) -> "RuleEntry":
+        """Append a new rule to the history and make it the selected one."""
+        entry = RuleEntry(f"r{next(self._rule_counter)}", origin, rule, confusion,
+                          self.labeled_signature(), time.time())
+        self.rule_history.append(entry)
+        self.selected_rule_id = entry.id
+        return entry
+
+    def select_rule(self, rule_id: str) -> bool:
+        if any(e.id == rule_id for e in self.rule_history):
+            self.selected_rule_id = rule_id
+            return True
+        return False
+
+    def set_concept(self, name: str | None, chebi_id: str | None, definition: str | None):
+        """Record the concept a seeding ChEBI class describes (name + definition).
+
+        The definition is only overwritten while the user has not begun editing one
+        for a *different* concept — re-seeding the same class refreshes it, switching
+        class replaces it, but adding more molecules from the same class keeps any
+        edit the user has since made."""
+        if chebi_id and chebi_id == self.concept_chebi_id and self.concept_definition is not None:
+            self.concept_name = name or self.concept_name
+            return
+        self.concept_name = name
+        self.concept_chebi_id = chebi_id
+        self.concept_definition = definition
+
     def clear(self):
         self.molecules.clear()
         self._by_smiles.clear()
         self._counter = itertools.count(1)
-        self.learned_rule = None
-        self.current_rule = None
+        self.rule_history.clear()
+        self.selected_rule_id = None
+        self._rule_counter = itertools.count(1)
         self.last_predictions.clear()
+        self.concept_name = None
+        self.concept_chebi_id = None
+        self.concept_definition = None
 
 
 # The single global demo session.

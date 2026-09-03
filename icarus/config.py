@@ -54,6 +54,36 @@ DEFAULT_MAX_BODY = 5
 DEFAULT_MAX_CLAUSES = 2
 DEFAULT_TIMEOUT = 20
 
+# Rule-generation methods the /api/learn endpoint accepts. All three reuse
+# chebILP infrastructure and produce a rule whose head is TARGET_LABEL, so the
+# classify / explain / NL steps downstream are method-agnostic.
+LEARN_METHODS = ("popper", "aleph", "llm")
+DEFAULT_LEARN_METHOD = "popper"
+
+# Aleph search bias. Aleph (chebILP.aleph_runner) runs under swipl over the same
+# atom-level background as Popper; clauselength is derived from this max_body.
+DEFAULT_ALEPH_MAX_BODY = 6
+
+# LLM path (chebILP.predicate_generation.generate_auxiliary_rules). Calls run
+# through the locally logged-in `claude` CLI and bill to that subscription.
+LLM_MODEL = os.environ.get("ICARUS_LLM_MODEL", "claude-haiku-4-5")
+# Number of auxiliary predicates to request from the model per rule.
+LLM_N_PREDICATES = int(os.environ.get("ICARUS_LLM_N_PREDICATES", "4"))
+# Reuse candidates retrieved from the session-local rule library per learn.
+LLM_TOP_K = int(os.environ.get("ICARUS_LLM_TOP_K", "16"))
+# Number of pos/neg example SMILES shown to the model in the prompt.
+LLM_PROMPT_SAMPLES = int(os.environ.get("ICARUS_LLM_PROMPT_SAMPLES", "8"))
+# Session-local shared library the LLM pipeline writes/reuses auxiliary rules in
+# (the real chebILP pipeline retrieves reuse candidates from it across learns).
+LLM_LIBRARY_DIR = os.path.join(ICARUS_DATA, "rule_library")
+# Offer mol_weight / ring_size facts to the model. Kept OFF so every predicate the
+# model writes grounds against icarus's standard atom-level background (the same
+# bk the classify step builds); otherwise a rule using those facts would silently
+# never fire at inference time.
+LLM_COMPUTED_FACTS = False
+# Train-F1 below which the class hypothesis gets one feedback round.
+LLM_HYPOTHESIS_MIN_F1 = float(os.environ.get("ICARUS_LLM_MIN_F1", "0.7"))
+
 
 # External data files this app reads (everything else it generates itself). Kept
 # here so a deployment on another machine has a single place to point at.

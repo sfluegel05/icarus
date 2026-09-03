@@ -79,17 +79,133 @@ function render(state) {
   renderStructGrid($("pos-list"), pos, state.has_rule);
   renderStructGrid($("neg-list"), neg, state.has_rule);
 
+  renderConcept(state.concept);
+
   if (state.has_rule) {
     $("rule-area").classList.remove("hidden");
-    const ta = $("rule-text");
-    if (document.activeElement !== ta) ta.value = state.current_rule || "";
-    $("edited-flag").textContent = state.edited ? "(edited — differs from learned rule)" : "";
-    $("rule-nl").textContent = state.rule_nl || "—";
+    const parts = state.rule_parts ||
+      { main: { rule: state.current_rule, nl: null }, aux: [] };
+    // Reload the block editor only when the selected rule actually changed, so an
+    // in-progress edit isn't clobbered on every state refresh (adding examples etc.).
+    const sig = `${state.selected_rule_id}|${state.has_rule}`;
+    if (sig !== lastRuleSig) {
+      lastRuleSig = sig;
+      Blocks.load(parts.main.rule || "");
+      editorDirty = false;
+      syncAdvancedFromBlocks(true);
+    }
+    $("rule-nl").textContent = parts.main.nl || "—";
+    renderAux(parts.aux || []);
     renderReport(state.report);
+    updateEditedFlag();
   } else {
+    lastRuleSig = null;
     $("rule-area").classList.add("hidden");
   }
+  renderHistory(state);
 }
+
+// The block editor is canonical for the main hypothesis; these track when to
+// (re)load it and whether the user has unsaved edits (blocks, aux, or Prolog).
+let lastRuleSig = null;
+let editorDirty = false;
+
+function syncAdvancedFromBlocks(force) {
+  const ta = $("rule-text");
+  if (force || document.activeElement !== ta) ta.value = Blocks.compile();
+}
+
+function updateEditedFlag() {
+  $("edited-flag").textContent =
+    editorDirty ? "(unsaved edits — Apply to save as a new rule)" : "";
+}
+
+// ── rule history ────────────────────────────────────────────────────────────
+const ORIGIN_LABELS = { popper: "Popper", aleph: "Aleph", llm: "LLM", edited: "Edited" };
+
+function relTime(ts) {
+  if (!ts) return "";
+  const d = Date.now() / 1000 - ts;
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return new Date(ts * 1000).toLocaleDateString();
+}
+
+function confSummary(c) {
+  return `<span class="rh-conf-cells">
+    <span class="rh-c good">TP ${c.TP}</span>
+    <span class="rh-c good">TN ${c.TN}</span>
+    <span class="rh-c bad">FP ${c.FP}</span>
+    <span class="rh-c bad">FN ${c.FN}</span></span>`;
+}
+
+// Collapsed by default; label/re-evaluate visibility depend on the current
+// collapse state plus the latest history summary.
+let historyMeta = { count: 0, anyStale: false };
+
+function updateHistoryChrome() {
+  const collapsed = $("rule-history-list").classList.contains("hidden");
+  const { count, anyStale } = historyMeta;
+  $("rh-toggle").textContent =
+    `${collapsed ? "▸ Show" : "▾ Hide"} rule history (${count})${anyStale ? " ⚠" : ""}`;
+  $("reeval-btn").classList.toggle("hidden", collapsed || !anyStale);
+}
+
+$("rh-toggle").onclick = () => {
+  $("rule-history-list").classList.toggle("hidden");
+  updateHistoryChrome();
+};
+
+function renderHistory(state) {
+  const area = $("rule-history-area"), list = $("rule-history-list");
+  const hist = state.rule_history || [];
+  if (!hist.length) { area.classList.add("hidden"); list.innerHTML = ""; return; }
+  area.classList.remove("hidden");
+  historyMeta = { count: hist.length, anyStale: hist.some((h) => h.stale) };
+  list.innerHTML = hist.map((h) => {
+    const selected = h.id === state.selected_rule_id;
+    const label = ORIGIN_LABELS[h.origin] || h.origin;
+    const conf = h.confusion
+      ? confSummary(h.confusion) +
+        (h.stale ? `<span class="rh-stale">⚠ examples changed since — re-evaluate</span>` : "")
+      : `<span class="muted">not evaluated</span>`;
+    return `<div class="rh-item ${selected ? "selected" : ""}" data-id="${h.id}">
+      <div class="rh-item-head">
+        <span class="rh-origin origin-${h.origin}">${label}</span>
+        <span class="muted rh-time">${relTime(h.created_at)}</span>
+        ${selected ? `<span class="rh-selected">● selected</span>`
+                   : `<button class="rh-select linkbtn">Select</button>`}
+      </div>
+      <div class="rh-rule mono">${escapeHtml(h.rule)}</div>
+      <div class="rh-conf">${conf}</div>
+    </div>`;
+  }).join("");
+  updateHistoryChrome();
+}
+
+// The concept definition (seeded from a ChEBI class, editable) — shown once a
+// concept exists; the edited text is what the LLM backend receives.
+function renderConcept(concept) {
+  const box = $("concept-box");
+  if (!concept || (!concept.name && !concept.definition)) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  $("concept-name").textContent = concept.name
+    ? (concept.chebi_id ? `${concept.name} (CHEBI:${concept.chebi_id})` : concept.name)
+    : "";
+  const ta = $("concept-def");
+  if (document.activeElement !== ta) ta.value = concept.definition || "";
+}
+
+// Persist an edited definition when the user leaves the box.
+$("concept-def").addEventListener("change", async () => {
+  try {
+    await api("/api/concept/definition", { definition: $("concept-def").value });
+  } catch (e) { /* toast already shown */ }
+});
 
 function renderStructGrid(container, mols, hasRule) {
   container.innerHTML = "";
@@ -109,7 +225,7 @@ function renderStructGrid(container, mols, hasRule) {
     card.innerHTML = `
       ${badge}
       <div class="card-ctrls">
-        <button class="mini-btn swap" data-id="${m.id}" data-to="${other}" title="move">${swap}</button>
+        <button class="mini-btn swap ${other}" data-id="${m.id}" data-to="${other}" title="Move to ${other === "pos" ? "positive" : "negative"}">${swap}</button>
         <button class="mini-btn x" data-id="${m.id}" title="remove">×</button>
       </div>
       <div class="thumb"><img loading="lazy" src="${depictUrl(m, 120, 100)}" alt=""></div>
@@ -151,6 +267,53 @@ function confCell(label, n, cls) {
   return `<div class="conf-cell ${cls}"><span class="n">${n}</span><span class="l">${label}</span></div>`;
 }
 
+// ── auxiliary predicates (LLM rules) ────────────────────────────────────────
+// The main hypothesis is shown on its own; the auxiliary predicates it builds on
+// get their own boxes + NL, hidden behind a toggle by default.
+function auxToggleLabel(n, collapsed) {
+  return `${collapsed ? "▸ Show" : "▾ Hide"} ${n} auxiliary predicate${n > 1 ? "s" : ""}`;
+}
+
+function renderAux(aux) {
+  const area = $("aux-area"), list = $("aux-list");
+  if (!aux || !aux.length) {
+    area.classList.add("hidden");
+    list.innerHTML = "";
+    return;
+  }
+  area.classList.remove("hidden");
+  $("aux-toggle").textContent = auxToggleLabel(aux.length, list.classList.contains("hidden"));
+  // Don't clobber a box the user is currently editing.
+  if (list.contains(document.activeElement)) return;
+  list.innerHTML = aux.map((a) => `
+    <div class="aux-item">
+      <div class="aux-name mono">${escapeHtml(a.name)}</div>
+      <div class="rule-split">
+        <textarea class="rule-text aux-rule" data-name="${escapeHtml(a.name)}" rows="2">${escapeHtml(a.rule || "")}</textarea>
+        <div class="rule-nl-box">
+          <div class="rule-nl-label">In words</div>
+          <div class="rule-nl">${escapeHtml(a.nl || "—")}</div>
+        </div>
+      </div>
+    </div>`).join("");
+}
+
+$("aux-toggle").onclick = () => {
+  const list = $("aux-list");
+  const collapsed = list.classList.toggle("hidden");
+  $("aux-toggle").textContent =
+    auxToggleLabel(list.querySelectorAll(".aux-item").length, collapsed);
+};
+
+// The full rule sent on apply = the auxiliary definitions plus the main hypothesis
+// compiled from the blocks (the block editor is canonical for the main hypothesis).
+function assembledRule() {
+  const aux = Array.from(document.querySelectorAll(".aux-rule"))
+    .map((t) => t.value.trim()).filter(Boolean);
+  const main = Blocks.compile().trim();
+  return [...aux, main].filter(Boolean).join("\n\n");
+}
+
 // ── detail modal ───────────────────────────────────────────────────────────
 function detailRow(k, v, { mono = false, html = false } = {}) {
   if (!v) return "";
@@ -159,13 +322,27 @@ function detailRow(k, v, { mono = false, html = false } = {}) {
 function openModal(id) {
   const m = molById[id];
   if (!m) return;
+  const other = m.label === "pos" ? "neg" : "pos";
+  const moveLabel = other === "pos" ? "→ Move to positive" : "→ Move to negative";
   $("modal-struct").innerHTML = `<img src="${depictUrl(m, 420, 220)}" alt="">`;
   $("modal-body").innerHTML = `
     <h3>${escapeHtml(m.name)}</h3>
     ${m.chebi_id ? detailRow("ChEBI ID", chebiLink(m.chebi_id), { html: true }) : ""}
     ${detailRow("SMILES", m.smiles, { mono: true })}
     ${detailRow("InChI", m.inchi, { mono: true })}
-    ${detailRow("Definition", sanitizeChebiHtml(m.definition), { html: true })}`;
+    ${detailRow("Definition", sanitizeChebiHtml(m.definition), { html: true })}
+    <div class="modal-actions">
+      <button class="action-btn ${other}" data-act="move">${moveLabel}</button>
+      <button class="action-btn remove" data-act="remove">× Remove</button>
+    </div>`;
+  $("modal-body").querySelector('[data-act="move"]').onclick = async () => {
+    $("modal").classList.add("hidden");
+    render(await api("/api/session/set_label", { id: m.id, label: other }));
+  };
+  $("modal-body").querySelector('[data-act="remove"]').onclick = async () => {
+    $("modal").classList.add("hidden");
+    render(await api("/api/session/remove", { id: m.id }));
+  };
   $("modal").classList.remove("hidden");
 }
 $("modal-close").onclick = () => $("modal").classList.add("hidden");
@@ -319,17 +496,28 @@ $("t-pos").onclick = () => decide("pos");
 $("t-neg").onclick = () => decide("neg");
 $("t-skip").onclick = () => decide(null);
 
-// ── learn (background Popper run with live output) ──────────────────────────
+// ── learn (background learner run with live output) ─────────────────────────
 let learnPoll = null;
 
+const METHOD_LABELS = { popper: "Popper", aleph: "Aleph", llm: "LLM" };
+
+// The timeout only bounds the ILP searches; the LLM call is bounded by the CLI.
+$("learn-method").addEventListener("change", () => {
+  $("timeout-wrap").style.display =
+    $("learn-method").value === "llm" ? "none" : "";
+});
+
 $("learn-btn").onclick = async () => {
+  const method = $("learn-method").value;
+  const label = METHOD_LABELS[method] || method;
   $("learn-btn").disabled = true;
-  $("learn-status").textContent = "Running Popper…";
+  $("learn-status").textContent = `Running ${label}…`;
   $("learn-progress").classList.remove("hidden");
+  document.querySelector(".lp-title").textContent = `${label} output`;
   $("learn-tail").textContent = "starting…";
   $("learn-full").textContent = "";
   try {
-    await api("/api/learn", { timeout: parseInt($("timeout").value) });
+    await api("/api/learn", { method, timeout: parseInt($("timeout").value) });
   } catch (err) {
     $("learn-status").textContent = "";
     $("learn-btn").disabled = false;
@@ -355,9 +543,13 @@ async function pollLearn() {
     if (p.error) {
       toast(p.error);
     } else {
-      render(p.state);
-      toast(p.message);
-      if (queue.length) showCurrent();  // refresh predictions on the visible candidate
+      // A learn may have written new aux predicates (LLM) — refresh the palette,
+      // then render so the returned rule loads with those blocks available.
+      loadPredicates().finally(() => {
+        render(p.state);
+        toast(p.message);
+        if (queue.length) showCurrent();  // refresh predictions on the visible candidate
+      });
     }
   }
 }
@@ -376,19 +568,54 @@ $("toggle-log").onclick = () => {
 
 // ── rule editing ─────────────────────────────────────────────────────────────
 $("apply-rule-btn").onclick = async () => {
-  const rule = $("rule-text").value.trim();
+  const rule = assembledRule();
   try {
     const data = await api("/api/rule/edit", { rule });
+    editorDirty = false;
+    // The applied rule becomes a new selected entry; force the editor to reload it.
+    lastRuleSig = null;
     render(data);
     toast(data.message);
     renderChanges(data.changed);
   } catch (e) { /* toast already shown */ }
 };
 
-$("revert-rule-btn").onclick = async () => {
-  const data = await api("/api/rule/reset", {});
+// Discard unsaved edits, restoring the selected rule (no new history entry).
+$("revert-rule-btn").onclick = () => {
+  editorDirty = false;
+  lastRuleSig = null;   // force a reload of the editor from the selected rule
+  if (lastState) render(lastState);
+  $("change-area").innerHTML = "";
+};
+
+// Aux-predicate text edits mark the rule dirty (main hypothesis edits come through
+// the block editor's onChange). The advanced Prolog box syncs on change (blur).
+$("rule-area").addEventListener("input", (e) => {
+  if (e.target.matches(".aux-rule")) { editorDirty = true; updateEditedFlag(); }
+});
+$("rule-text").addEventListener("input", () => { editorDirty = true; updateEditedFlag(); });
+$("rule-text").addEventListener("change", () => {
+  // Parse hand-edited Prolog back into blocks so the two views stay in sync.
+  Blocks.load($("rule-text").value);
+  editorDirty = true;
+  updateEditedFlag();
+});
+
+// Select a rule from the history — makes it the current, editable rule.
+$("rule-history-list").addEventListener("click", async (e) => {
+  const item = e.target.closest(".rh-item");
+  if (!item) return;
+  const id = item.dataset.id;
+  if (lastState && id === lastState.selected_rule_id) return;
+  const data = await api("/api/rule/select", { id });
   render(data);
   $("change-area").innerHTML = "";
+});
+
+// Re-score every history rule against the current examples (clears stale flags).
+$("reeval-btn").onclick = async () => {
+  const data = await api("/api/rules/reevaluate", {});
+  render(data);
   toast(data.message);
 };
 
@@ -424,5 +651,27 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// ── block editor wiring ──────────────────────────────────────────────────────
+Blocks.init({
+  palette: $("block-palette"),
+  canvas: $("block-canvas"),
+  onChange: () => {
+    // A block edit: mark dirty and mirror the compiled Prolog into the advanced box.
+    editorDirty = true;
+    syncAdvancedFromBlocks();
+    updateEditedFlag();
+  },
+});
+
+let catalogLoaded = false;
+async function loadPredicates() {
+  try {
+    const data = await api("/api/predicates");
+    Blocks.setCatalog(data.catalog, data.aux, data.target);
+    catalogLoaded = true;
+  } catch (e) { /* toast already shown */ }
+}
+
 // initial load
+loadPredicates();
 api("/api/state").then(render);

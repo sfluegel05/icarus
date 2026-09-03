@@ -61,6 +61,14 @@ def class_name(chebi_id: str) -> str:
     return f"CHEBI:{chebi_id}"
 
 
+def class_definition(chebi_id: str) -> str | None:
+    """The ChEBI textual definition of a class, or ``None`` if it has none."""
+    g = graph()
+    if chebi_id in g.nodes:
+        return g.nodes[chebi_id].get("definition")
+    return None
+
+
 def search_classes(query: str, limit: int = 25) -> list[dict]:
     """Search ChEBI classes by id or (case-insensitive) name substring.
 

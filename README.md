@@ -1,8 +1,9 @@
 # ICaRuS — Interactive ChemicAl RUle System
 
 A minimal demo prototype. A chemistry domain expert describes a chemical concept
-as a **Prolog rule**, learned from positive and negative example molecules with
-the ILP system **Popper** (non-noisy mode). Examples come from a ChEBI class
+as a **Prolog rule**, learned from positive and negative example molecules by one
+of three interchangeable backends: the ILP systems **Popper** (noisy/MDL) and
+**Aleph**, or an **LLM**. Examples come from a ChEBI class
 and/or from SMILES / InChI input, and the tool suggests more molecules by
 fingerprint similarity. The learned rule is shown, its misclassifications are
 flagged, and the expert can hand-edit the rule (seeing which classifications
@@ -33,11 +34,29 @@ This extends the per-class ChEBI approach in `../chebILP` to arbitrary molecules
    shown **one at a time** (a "tinder"-style card): the structure is primary, with
    name / id / definition secondary, and — once a rule exists — the rule's
    prediction shown so you can confirm or contradict it as you add it +/−.
-3. **Learn** — the labelled molecules are translated into an ILP problem
-   (`exs.pl` / `bk.pl` / `bias.pl`) with chebILP's atom-level FOL predicates, and
-   Popper learns a rule. Popper runs in a background thread; its **live output**
-   streams into the UI (last few lines shown, full log on demand). The rule is
-   shown alongside its **natural-language translation** (chebILP `rule_to_nl`),
+3. **Learn** — pick a **method** (Popper / Aleph / LLM) and the labelled molecules
+   are turned into a rule, run in a background thread whose **live output** streams
+   into the UI (last few lines shown, full log on demand). All three reuse chebILP's
+   atom-level FOL translation and produce a rule with the same `concept/1` head, so
+   everything downstream is method-agnostic:
+   - **Popper** — the molecules become an ILP problem (`exs.pl` / `bk.pl` /
+     `bias.pl`) and Popper learns a rule in noisy mode (MDL cost function, via
+     chebILP's training subprocess), returning the best rule found even when none
+     perfectly separates the examples.
+   - **Aleph** — the same background + (bias-filtered) predicates become an Aleph
+     `.b` / `.f` / `.n` problem, learned under `swipl` (chebILP `aleph_runner`),
+     configured non-noisy so it seeks a cleanly-separating rule.
+   - **LLM** — drives chebILP's actual rule pipeline (`generate_auxiliary_rules`'s
+     `RuleGenerator`, sourced from the session molecules): the local `claude` CLI is
+     prompted with the concept's name, **textual definition** and sibling classes to
+     write auxiliary ASP predicates and a class hypothesis; the predicates are
+     validated/grounded, the hypothesis is scored (train-F1) with one feedback round
+     if weak, and the kept auxiliary clauses plus the `concept(A) :- …` hypothesis are
+     assembled into one self-contained rule. The **concept definition** is shown in an
+     editable box once you seed from a ChEBI class — edit it and the edited text is
+     what the model sees (in place of the original ChEBI definition). Predicates the
+     pipeline writes are kept in a session-local library and reused across learns.
+   The rule is shown alongside its **natural-language translation** (chebILP `rule_to_nl`),
    with a confusion matrix and the molecules **"not classified as told"** (false
    positives / negatives). Every molecule the rule marks positive gets a **"?"**
    button showing a graphical + textual explanation of *why* (chebILP
@@ -59,7 +78,14 @@ This extends the per-class ChEBI approach in `../chebILP` to arbitrary molecules
 - **`icarus/ilp.py`** — builds the ILP problem with
   `chebILP.ilp_problem_builder.build_background_chemlog` +
   `chebi_utils.extract_properties`, runs Popper via chebILP's training
-  subprocess, and classifies molecules with clingo (`evaluate_with_clingo`).
+  subprocess, classifies molecules with clingo (`evaluate_with_clingo`), and
+  dispatches a learn request to one of the three backends (`learn_dispatch`).
+- **`icarus/aleph.py`** — Aleph backend: writes the `.b` / `.f` / `.n` problem
+  (`build_aleph_background`) and runs it via chebILP's `aleph_runner`, rewriting the
+  learned head to `concept`.
+- **`icarus/llm_rulegen.py`** — LLM backend: reuses chebILP's
+  `generate_auxiliary_rules` prompt/contract, structured `claude`-CLI call,
+  predicate grounding and hypothesis scoring, driven over the session molecules.
 - **`icarus/app.py`** — Starlette JSON API + static file serving.
 - **`web/`** — single-page frontend (vanilla JS).
 
@@ -132,12 +158,22 @@ server prints whether both files were located and names any that are missing.
 | `ICARUS_DATA_DIR` | `icarus/data` | Writable dir: fingerprint cache + ILP work files |
 | `ICARUS_POOL_SIZE` | `12000` | Molecules fingerprinted for suggestions |
 | `ICARUS_PORT` | `8000` | HTTP port |
+| `ICARUS_LLM_MODEL` | `claude-haiku-4-5` | Model id for the LLM backend (local `claude` CLI) |
+
+The LLM backend calls the locally logged-in `claude` CLI (via the Claude Agent SDK)
+and bills to that subscription; it needs the CLI installed and `/login`-ed, and the
+Aleph backend needs `swipl` on `PATH` (both already present in the `chebILP/.wslvenv`
+setup).
 
 ## Notes / limitations (it's a demo)
 
 - Single global in-memory session; no persistence, auth, or concurrency.
-- Learning runs Popper synchronously (blocks for up to the timeout).
-- The Popper bias is kept small (low-arity atom predicates, `max_vars`/`max_body`
-  bounded) so non-noisy learning returns a perfectly-separating rule quickly.
-- Future work (per the project plan): functional-group predicates and
-  LLM-based predicate invention.
+- Learning runs in a background thread (the UI polls for live output); the `timeout`
+  bounds the Popper and Aleph searches, while the LLM call is bounded by the CLI.
+- The Popper/Aleph bias is kept small (low-arity atom predicates, `max_vars`/`max_body`
+  bounded) so learning returns quickly. Popper runs in noisy (MDL) mode — the best rule
+  found, which need not separate the examples perfectly; Aleph runs non-noisy.
+- The LLM backend offers only the atom-level background predicates (no `mol_weight` /
+  `ring_size` computed facts), so every rule it writes grounds through the same clingo
+  background the classify step builds.
+- Future work (per the project plan): functional-group predicates.

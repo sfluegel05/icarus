@@ -37,7 +37,7 @@
       </div>
 
       <div class="examples-grid">
-        <div class="example-col">
+        <div class="example-col pos-col">
           <h3 class="pos-head">Positive <span id="pos-count" class="pill">0</span></h3>
           <div class="add-box">
             <textarea id="pos-input" rows="2" placeholder="Add SMILES / InChI (one per line)"></textarea>
@@ -45,7 +45,7 @@
           </div>
           <div id="pos-list" class="struct-grid"></div>
         </div>
-        <div class="example-col">
+        <div class="example-col neg-col">
           <h3 class="neg-head">Negative <span id="neg-count" class="pill">0</span></h3>
           <div class="add-box">
             <textarea id="neg-input" rows="2" placeholder="Add SMILES / InChI (one per line)"></textarea>
@@ -90,15 +90,32 @@
     <!-- STEP 3: LEARN & RULE -->
     <section class="card">
       <h2>3 · Learn a rule</h2>
+
+      <div id="concept-box" class="concept-box hidden">
+        <label class="rule-label">Concept definition
+          <span class="muted">(editable — passed to the LLM in place of the ChEBI definition)</span>
+        </label>
+        <div id="concept-name" class="muted"></div>
+        <textarea id="concept-def" rows="3" class="rule-text"
+                  placeholder="A textual description of the concept, shown to the LLM."></textarea>
+      </div>
+
       <div class="row">
-        <label class="mini">timeout&nbsp;s <input id="timeout" type="number" value="20" min="5" max="120"></label>
-        <button id="learn-btn">Learn rule with Popper</button>
+        <label class="mini">method
+          <select id="learn-method">
+            <option value="popper">Popper (ILP)</option>
+            <option value="aleph">Aleph (ILP)</option>
+            <option value="llm">LLM</option>
+          </select>
+        </label>
+        <label class="mini" id="timeout-wrap">timeout&nbsp;s <input id="timeout" type="number" value="20" min="5" max="120"></label>
+        <button id="learn-btn">Learn rule</button>
         <span id="learn-status" class="muted"></span>
       </div>
 
       <div id="learn-progress" class="learn-progress hidden">
         <div class="lp-head">
-          <span class="lp-title">Popper output</span>
+          <span class="lp-title">output</span>
           <button id="toggle-log" class="linkbtn">show full output</button>
         </div>
         <pre id="learn-tail" class="log-view"></pre>
@@ -106,23 +123,49 @@
       </div>
 
       <div id="rule-area" class="hidden">
-        <label class="rule-label">Hypothesis <span class="muted">(edit and apply to see what changes)</span></label>
-        <div class="rule-split">
-          <textarea id="rule-text" rows="4" class="rule-text"></textarea>
-          <div class="rule-nl-box">
-            <div class="rule-nl-label">In words</div>
-            <div id="rule-nl" class="rule-nl"></div>
+        <label class="rule-label">Build the rule
+          <span class="muted">(drag blocks onto the molecule or an atom; apply to see what changes)</span>
+        </label>
+        <div class="block-editor">
+          <div id="block-palette" class="block-palette"></div>
+          <div class="block-main">
+            <div id="block-canvas" class="block-canvas"></div>
+            <div class="rule-nl-box">
+              <div class="rule-nl-label">In words</div>
+              <div id="rule-nl" class="rule-nl"></div>
+            </div>
           </div>
         </div>
+
+        <details id="advanced-prolog" class="advanced-prolog">
+          <summary>Advanced: edit as Prolog</summary>
+          <textarea id="rule-text" rows="4" class="rule-text"
+                    placeholder="concept(V0) :- has_atom(V0,V1), n(V1)."></textarea>
+          <div class="muted adv-hint">Edited Prolog is parsed back into blocks when you click away.</div>
+        </details>
+
+        <div id="aux-area" class="aux-area hidden">
+          <button id="aux-toggle" class="linkbtn" type="button"></button>
+          <div id="aux-list" class="aux-list hidden"></div>
+        </div>
+
         <div class="row">
           <button id="apply-rule-btn">Apply edited rule</button>
-          <button id="revert-rule-btn" class="ghost">Revert to learned</button>
+          <button id="revert-rule-btn" class="ghost">Revert edits</button>
           <span id="edited-flag" class="muted"></span>
         </div>
 
         <div id="confusion" class="confusion"></div>
         <div id="mismatch-area"></div>
         <div id="change-area"></div>
+
+        <div id="rule-history-area" class="rule-history-area hidden">
+          <div class="rh-head">
+            <button id="rh-toggle" class="linkbtn" type="button"></button>
+            <button id="reeval-btn" class="ghost hidden">Re-evaluate all</button>
+          </div>
+          <div id="rule-history-list" class="rule-history-list hidden"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -145,6 +188,7 @@
     </div>
   </div>
 
+  <script src="/static/blocks.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

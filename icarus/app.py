@@ -20,7 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from chebi_utils.read_molecule import smiles_or_inchi_to_mol
 
-from . import config, data_store, ilp, render, similarity
+from . import config, data_store, ilp, predicates, render, similarity
 from .session import SESSION
 
 
@@ -44,17 +44,33 @@ def recompute_predictions() -> dict[str, bool]:
     return preds
 
 
+def _confusion(preds: dict[str, bool]) -> dict:
+    """{TP,FP,TN,FN} counts over the labelled molecules for a prediction map."""
+    conf = {"TP": 0, "FP": 0, "TN": 0, "FN": 0}
+    for m in SESSION.labeled():
+        conf[_outcome(m.label, preds.get(m.id, False))] += 1
+    return conf
+
+
+def _confusion_for_rule(rule: str) -> dict | None:
+    """Classify every labelled molecule under ``rule`` and return its confusion
+    matrix, or None if the rule fails to evaluate."""
+    try:
+        preds = ilp.classify(rule, list(SESSION.molecules.values()))
+    except ilp.RuleError:
+        return None
+    return _confusion(preds)
+
+
 def _report(preds: dict[str, bool]) -> dict:
     """Confusion matrix + misclassified molecule ids over labelled molecules."""
-    conf = {"TP": 0, "FP": 0, "TN": 0, "FN": 0}
     mismatches = []
     for m in SESSION.labeled():
         o = _outcome(m.label, preds.get(m.id, False))
-        conf[o] += 1
         if o in ("FP", "FN"):
             mismatches.append({"id": m.id, "name": m.name, "smiles": m.smiles,
                                "label": m.label, "outcome": o})
-    return {"confusion": conf, "mismatches": mismatches}
+    return {"confusion": _confusion(preds), "mismatches": mismatches}
 
 
 def state_dict() -> dict:
@@ -72,18 +88,25 @@ def state_dict() -> dict:
         mols.append(d)
     n_pos = sum(1 for m in SESSION.molecules.values() if m.label == "pos")
     n_neg = sum(1 for m in SESSION.molecules.values() if m.label == "neg")
+    cur_sig = SESSION.labeled_signature()
     out = {
         "molecules": mols,
         "counts": {"pos": n_pos, "neg": n_neg,
                    "unlabeled": len(SESSION.molecules) - n_pos - n_neg},
-        "learned_rule": SESSION.learned_rule,
         "current_rule": SESSION.current_rule,
         "has_rule": bool(SESSION.current_rule),
-        "edited": bool(SESSION.current_rule and SESSION.current_rule != SESSION.learned_rule),
+        # Newest first, so the most recent rule heads the history list.
+        "rule_history": [e.to_dict(cur_sig) for e in reversed(SESSION.rule_history)],
+        "selected_rule_id": SESSION.selected_rule_id,
+        "concept": {
+            "name": SESSION.concept_name,
+            "chebi_id": SESSION.concept_chebi_id,
+            "definition": SESSION.concept_definition,
+        },
     }
     if SESSION.current_rule:
         out["report"] = _report(preds)
-        out["rule_nl"] = ilp.rule_to_nl(SESSION.current_rule)
+        out["rule_parts"] = ilp.rule_to_nl_parts(SESSION.current_rule)
     return out
 
 
@@ -164,6 +187,17 @@ async def api_state(request: Request):
         return ok()  # ok() refreshes predictions when a rule exists
 
 
+async def api_predicates(request: Request):
+    """The building-block catalog for the visual rule editor. ``aux`` grows as the
+    LLM pipeline writes generated predicates into the session library, so it is
+    read fresh on each request."""
+    return JSONResponse({
+        "catalog": predicates.catalog(),
+        "aux": predicates.aux_blocks(config.LLM_LIBRARY_DIR),
+        "target": config.TARGET_LABEL,
+    })
+
+
 async def classes_search(request: Request):
     q = request.query_params.get("q", "")
     return JSONResponse({"results": data_store.search_classes(q)})
@@ -180,6 +214,10 @@ async def session_from_class(request: Request):
         pos_ids, neg_ids = data_store.gather_class_examples(chebi_id, max_pos, max_neg)
         added_pos = sum(1 for cid in pos_ids if SESSION.add_from_chebi_id(cid, "pos"))
         added_neg = sum(1 for cid in neg_ids if SESSION.add_from_chebi_id(cid, "neg"))
+        # Record the class as the concept: its name + editable definition become
+        # the LLM pipeline's textual input.
+        SESSION.set_concept(data_store.class_name(chebi_id), chebi_id,
+                            data_store.class_definition(chebi_id))
         return ok(message=f"Added {added_pos} positive and {added_neg} negative examples "
                           f"from {data_store.class_name(chebi_id)}.")
 
@@ -214,6 +252,14 @@ async def session_reset(request: Request):
     with SESSION.lock:
         SESSION.clear()
         return ok(message="Session cleared.")
+
+
+async def concept_definition(request: Request):
+    """Update the editable concept definition passed to the LLM pipeline."""
+    body = await request.json()
+    with SESSION.lock:
+        SESSION.concept_definition = (body.get("definition") or "")
+        return ok()
 
 
 async def suggest(request: Request):
@@ -261,19 +307,23 @@ async def suggest_accept(request: Request):
         return ok()
 
 
-# Live-learning state, updated by the background Popper thread and polled by the UI.
+# Live-learning state, updated by the background learner thread and polled by the UI.
 LEARN_LOCK = threading.Lock()
 LEARN = {"running": False, "done": False, "error": None, "lines": [],
-         "message": None, "score": None}
+         "message": None, "score": None, "method": config.DEFAULT_LEARN_METHOD}
+
+# How each method is named in the UI's live-output panel and status messages.
+_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": "LLM"}
 
 
-def _learn_worker(pos, neg, timeout):
+def _learn_worker(pos, neg, timeout, method, model, concept):
     def on_line(line):
         with LEARN_LOCK:
             LEARN["lines"].append(line)
 
     try:
-        result = ilp.learn_streaming(pos, neg, timeout, on_line)
+        result = ilp.learn_dispatch(method, pos, neg, timeout, on_line,
+                                    model=model, concept=concept)
     except Exception as e:
         traceback.print_exc()
         with LEARN_LOCK:
@@ -282,11 +332,10 @@ def _learn_worker(pos, neg, timeout):
 
     rule = result.get("rule")
     with SESSION.lock:
-        SESSION.learned_rule = rule
-        SESSION.current_rule = rule
         if rule:
+            entry = SESSION.add_rule(method, rule)
             try:
-                recompute_predictions()
+                entry.confusion = _confusion(recompute_predictions())
             except ilp.RuleError:
                 pass
     with LEARN_LOCK:
@@ -305,15 +354,22 @@ async def learn(request: Request):
     except Exception:
         body = {}
     timeout = _int(body.get("timeout"), config.DEFAULT_TIMEOUT)
+    method = str(body.get("method") or config.DEFAULT_LEARN_METHOD).lower()
+    if method not in config.LEARN_METHODS:
+        return JSONResponse({"error": f"Unknown method '{method}'."}, status_code=400)
+    model = body.get("model") or config.LLM_MODEL
 
     with LEARN_LOCK:
         if LEARN["running"]:
             return JSONResponse({"error": "Already learning."}, status_code=409)
-        LEARN.update(running=True, done=False, error=None, lines=[], message=None, score=None)
+        LEARN.update(running=True, done=False, error=None, lines=[], message=None,
+                     score=None, method=method)
 
     with SESSION.lock:
         pos = SESSION.positives()
         neg = [m for m in SESSION.molecules.values() if m.label == "neg"]
+        concept = {"name": SESSION.concept_name, "chebi_id": SESSION.concept_chebi_id,
+                   "definition": SESSION.concept_definition}
 
     if not pos or not neg:
         with LEARN_LOCK:
@@ -322,7 +378,8 @@ async def learn(request: Request):
         return JSONResponse(
             {"error": "Need at least one positive and one negative example."}, status_code=400)
 
-    threading.Thread(target=_learn_worker, args=(pos, neg, timeout), daemon=True).start()
+    threading.Thread(target=_learn_worker, args=(pos, neg, timeout, method, model, concept),
+                     daemon=True).start()
     return JSONResponse({"started": True})
 
 
@@ -331,11 +388,11 @@ async def learn_progress(request: Request):
     with LEARN_LOCK:
         lines = list(LEARN["lines"])
         running, done, error = LEARN["running"], LEARN["done"], LEARN["error"]
-        message, score = LEARN["message"], LEARN["score"]
+        message, score, method = LEARN["message"], LEARN["score"], LEARN["method"]
     resp = {
         "running": running, "done": done, "error": error, "message": message,
-        "score": score, "tail": lines[-6:], "log": "\n".join(lines),
-        "total_lines": len(lines),
+        "score": score, "method": method, "method_label": _METHOD_LABELS.get(method, method),
+        "tail": lines[-6:], "log": "\n".join(lines), "total_lines": len(lines),
     }
     if done and not error:
         resp["state"] = state_dict()
@@ -345,19 +402,28 @@ async def learn_progress(request: Request):
 async def rule_edit(request: Request):
     body = await request.json()
     new_rule = (body.get("rule") or "").strip()
+    # A rule that uses a generated (aux_*) predicate carries only the literal; pull in
+    # the predicate's definition from the library so it is self-contained and clingo
+    # can actually derive it (otherwise it classifies everything negative).
+    new_rule = ilp.expand_aux_definitions(new_rule)
     with SESSION.lock:
         if not ilp.rule_targets_ok(new_rule):
             return JSONResponse(
                 {"error": f"Rule must define the target predicate "
                           f"'{config.TARGET_LABEL}(...) :- ...'."}, status_code=400)
         old_preds = dict(SESSION.last_predictions)
-        prev_rule = SESSION.current_rule
-        SESSION.current_rule = new_rule
+        # Validate/classify before touching state so a bad edit doesn't disturb
+        # the selected rule.
         try:
-            new_preds = recompute_predictions()
+            new_preds = ilp.classify(new_rule, list(SESSION.molecules.values()))
         except ilp.RuleError as e:
-            SESSION.current_rule = prev_rule
             return JSONResponse({"error": f"Invalid rule: {e}"}, status_code=400)
+        selected = SESSION.selected_entry()
+        # Only record a new history entry when the applied rule actually differs
+        # from the currently selected one.
+        if selected is None or new_rule != selected.rule:
+            SESSION.add_rule("edited", new_rule, confusion=_confusion(new_preds))
+        SESSION.last_predictions = new_preds
         changed = []
         for m in SESSION.molecules.values():
             o, n = old_preds.get(m.id), new_preds.get(m.id)
@@ -368,15 +434,26 @@ async def rule_edit(request: Request):
                   changed=changed)
 
 
-async def rule_reset(request: Request):
+async def rule_select(request: Request):
+    """Make an existing history entry the currently selected (editable) rule."""
+    body = await request.json()
     with SESSION.lock:
-        SESSION.current_rule = SESSION.learned_rule
-        if SESSION.current_rule:
-            try:
-                recompute_predictions()
-            except ilp.RuleError:
-                pass
-        return ok(message="Reverted to the learned rule.")
+        if not SESSION.select_rule(str(body.get("id"))):
+            return JSONResponse({"error": "Unknown rule."}, status_code=404)
+        return ok()
+
+
+async def rules_reevaluate(request: Request):
+    """Re-score every rule in the history against the current example set,
+    refreshing each stored confusion matrix and clearing the stale flags."""
+    with SESSION.lock:
+        sig = SESSION.labeled_signature()
+        for e in SESSION.rule_history:
+            conf = _confusion_for_rule(e.rule)
+            if conf is not None:
+                e.confusion = conf
+                e.signature = sig
+        return ok(message=f"Re-evaluated {len(SESSION.rule_history)} rule(s).")
 
 
 routes = [
@@ -384,18 +461,21 @@ routes = [
     Route("/api/depict", depict),
     Route("/api/explain", explain),
     Route("/api/state", api_state),
+    Route("/api/predicates", api_predicates),
     Route("/api/classes/search", classes_search),
     Route("/api/session/from_class", session_from_class, methods=["POST"]),
     Route("/api/session/add", session_add, methods=["POST"]),
     Route("/api/session/set_label", session_set_label, methods=["POST"]),
     Route("/api/session/remove", session_remove, methods=["POST"]),
     Route("/api/session/reset", session_reset, methods=["POST"]),
+    Route("/api/concept/definition", concept_definition, methods=["POST"]),
     Route("/api/suggest", suggest, methods=["POST"]),
     Route("/api/suggest/accept", suggest_accept, methods=["POST"]),
     Route("/api/learn", learn, methods=["POST"]),
     Route("/api/learn/progress", learn_progress),
     Route("/api/rule/edit", rule_edit, methods=["POST"]),
-    Route("/api/rule/reset", rule_reset, methods=["POST"]),
+    Route("/api/rule/select", rule_select, methods=["POST"]),
+    Route("/api/rules/reevaluate", rules_reevaluate, methods=["POST"]),
 ]
 
 @contextlib.asynccontextmanager
@@ -411,6 +491,20 @@ async def _lifespan(app):
         )
     else:
         print("[ICaRuS] data files located; ready.", flush=True)
+        # Warm the reference-data caches up front (in a worker thread so the event
+        # loop stays responsive) so class autocomplete works from the first
+        # keystroke instead of triggering a ~10s graph load on first search.
+        import asyncio
+
+        async def _warm():
+            try:
+                await asyncio.to_thread(data_store.graph)
+                await asyncio.to_thread(data_store.molecules)
+                print("[ICaRuS] reference data preloaded.", flush=True)
+            except Exception as exc:  # pragma: no cover - best-effort warmup
+                print(f"[ICaRuS] warmup failed: {exc}", flush=True)
+
+        asyncio.create_task(_warm())
     yield
 
 

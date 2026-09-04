@@ -16,6 +16,38 @@ CHEBILP_DIR = os.environ.get(
     "/mnt/c/Users/sifluegel/PycharmProjects/chebILP",
 )
 
+# chebILP keeps its API config (OPENAI_API_BASE/OPENAI_API_KEY, ANTHROPIC_API_KEY)
+# in CHEBILP_DIR/.env and reads it via load_dotenv(), which searches from the
+# process cwd upward. We run from the icarus dir, so that search never reaches
+# chebILP's sibling .env — load it explicitly here (without overriding anything
+# already set in the real environment) so the openai/ LLM backend finds its base
+# URL and key.
+def _load_chebilp_env() -> None:
+    env_path = os.path.join(CHEBILP_DIR, ".env")
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=False)
+        return
+    except ImportError:
+        pass
+    # Fallback: minimal KEY=VALUE parser so the openai/ backend still finds its
+    # config even if python-dotenv isn't importable in this interpreter.
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip().strip("'\"")
+
+
+_load_chebilp_env()
+
 CHEBI_VERSION = int(os.environ.get("ICARUS_CHEBI_VERSION", "251"))
 
 _DATA = os.path.join(CHEBILP_DIR, "data", f"chebi_v{CHEBI_VERSION}")
@@ -64,9 +96,12 @@ DEFAULT_LEARN_METHOD = "popper"
 # atom-level background as Popper; clauselength is derived from this max_body.
 DEFAULT_ALEPH_MAX_BODY = 6
 
-# LLM path (chebILP.predicate_generation.generate_auxiliary_rules). Calls run
-# through the locally logged-in `claude` CLI and bill to that subscription.
-LLM_MODEL = os.environ.get("ICARUS_LLM_MODEL", "claude-haiku-4-5")
+# LLM path (chebILP.predicate_generation.generate_auxiliary_rules). chebILP's
+# llm_client routes on the model id: a `provider/name` id (e.g.
+# `openai/agent_d7-gH6BBrzS_2ndkcKjLB`, the qwen3.5 model) goes to the
+# OpenAI-compatible endpoint set by OPENAI_API_BASE/OPENAI_API_KEY; a bare id
+# (e.g. `claude-haiku-4-5`) runs through the locally logged-in `claude` CLI.
+LLM_MODEL = os.environ.get("ICARUS_LLM_MODEL", "openai/agent_d7-gH6BBrzS_2ndkcKjLB")
 # Number of auxiliary predicates to request from the model per rule.
 LLM_N_PREDICATES = int(os.environ.get("ICARUS_LLM_N_PREDICATES", "4"))
 # Reuse candidates retrieved from the session-local rule library per learn.

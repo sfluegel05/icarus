@@ -382,10 +382,14 @@ def aux_blocks(library_dir: str) -> list[dict]:
         arity = arity if arity in (1, 2) else 1
         label = _format_aux_name(name) or name
         desc = descriptions.get(name) or ""
+        # An arity-1 generated predicate may hold of the molecule OR of a single
+        # atom — the arity alone doesn't say which — so scope "any" lets the user
+        # drop it onto the molecule area or an atom, wherever it belongs. Arity-2
+        # is a relation between two atoms (drawn with the bond/connect handle).
         if arity == 2:
             scope, nl = "bond", f"forms “{label}” with"
         else:
-            scope, nl = "molecule", f"the molecule has the property “{label}”"
+            scope, nl = "any", f"has the property “{label}”"
         blocks.append({
             "id": f"aux_{name}",
             "category": "Generated (LLM)",

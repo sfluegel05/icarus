@@ -611,6 +611,9 @@
     },
     addToSelected(pred, scope) {
       const s = this.selected;
+      // An "any"-scope block goes wherever the user has selected (an atom if one is
+      // selected, otherwise the molecule area).
+      if (scope === "any") scope = (s && s.kind === "atom") ? "atom" : "molecule";
       if (scope === "molecule") {
         const ci = s && s.kind === "mol" ? s.ci : 0;
         const cl = this.model.clauses[ci]; if (!cl || cl.rawClause) return;
@@ -632,14 +635,17 @@
 
     // ── drag/drop of palette blocks onto a zone ───────────────────────────────
     wireDrop(zone, scope, add, passEvent) {
+      // An "any"-scope block (an arity-1 generated predicate whose atom-vs-molecule
+      // role is unknown) is accepted by both the molecule area and atom boxes.
+      const accepts = (ds) => ds === scope || ds === "any";
       zone.addEventListener("dragover", (e) => {
-        if (Editor._dragScope === scope) { e.preventDefault(); zone.classList.add("drop-hover"); }
+        if (accepts(Editor._dragScope)) { e.preventDefault(); zone.classList.add("drop-hover"); }
       });
       zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
       zone.addEventListener("drop", (e) => {
         zone.classList.remove("drop-hover");
         let payload; try { payload = JSON.parse(e.dataTransfer.getData("text/plain")); } catch (_) { return; }
-        if (!payload || payload.scope !== scope) return;
+        if (!payload || !accepts(payload.scope)) return;
         e.preventDefault(); e.stopPropagation();
         add(payload.pred, passEvent ? e : undefined);
       });

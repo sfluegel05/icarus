@@ -345,8 +345,9 @@ def _aux_head_arity(program_path: str) -> int | None:
     return 0 if not args else len([a for a in args.split(",") if a.strip()])
 
 
-def aux_blocks(library_dir: str) -> list[dict]:
-    """Blocks for the LLM-generated ``aux_*`` predicates in the session library.
+def aux_blocks(library_dir: str, names=None) -> list[dict]:
+    """Blocks for the LLM-generated ``aux_*`` predicates in the session library,
+    restricted to ``names`` when given (``None`` = the whole library).
 
     Names + descriptions come from ``rule_to_nl.load_aux_descriptions``; the arity
     (parsed from each program head) decides the scope — arity 1 is treated as a
@@ -373,6 +374,8 @@ def aux_blocks(library_dir: str) -> list[dict]:
 
     blocks = []
     for name in sorted(descriptions):
+        if names is not None and name not in names:
+            continue
         arity = None
         for ext in (".pl", ".py"):
             path = os.path.join(programs_dir, name + ext)

@@ -112,47 +112,56 @@ def _undirected() -> nx.Graph:
     return graph().to_undirected()
 
 
+@functools.lru_cache(maxsize=1)
+def _heavy_atom_counts() -> dict[str, int]:
+    """Heavy-atom count per ChEBI molecule id (cached; molecules without a mol are omitted)."""
+    counts = {}
+    for cid, mol in molecules()["mol"].items():
+        try:
+            if mol is not None:
+                counts[str(cid)] = mol.GetNumHeavyAtoms()
+        except Exception:
+            pass
+    return counts
+
+
 def _heavy_atom_count(chebi_id: str) -> int:
     """Number of heavy atoms of a ChEBI molecule (fallback: large, so it sorts last)."""
-    df = molecules()
-    try:
-        mol = df.loc[chebi_id, "mol"]
-        return mol.GetNumHeavyAtoms() if mol is not None else 10 ** 6
-    except Exception:
-        return 10 ** 6
+    return _heavy_atom_counts().get(chebi_id, 10 ** 6)
 
 
 def _closest_negatives(chebi_id, candidates, pos_descendants, max_samples) -> list[str]:
     """Molecule ids closest to ``chebi_id`` in the hierarchy but not below it.
 
-    BFS outward over the undirected is_a graph, collecting descendant molecules of
-    each visited neighbour, until ``max_samples`` are found. Reuses the cached
-    transitive closure, so it is fast, and explicitly excludes the target's own
-    descendants (which would otherwise leak in through a parent node).
+    BFS outward over the undirected is_a graph, one distance ring at a time. Each
+    ring contributes the visited nodes themselves plus their descendant molecules;
+    within a ring, the **smallest** molecules (fewest heavy atoms) are taken first.
+    The next ring is only consulted if the closer ones yield fewer than
+    ``max_samples``. The target's own descendants are excluded (they would
+    otherwise leak in through a parent node).
     """
-    import collections
-
     tc = transitive_closure()
     und = _undirected()
-    q = collections.deque([chebi_id])
     visited = {chebi_id}
-    selected, seen = [], set()
-    while q:
-        current = q.popleft()
-        for nb in und.neighbors(current):
-            if nb in visited:
-                continue
-            visited.add(nb)
-            q.append(nb)
-            for sub in tc.predecessors(nb):
+    frontier = [chebi_id]
+    selected = []
+    while frontier and len(selected) < max_samples:
+        next_frontier = []
+        for current in frontier:
+            for nb in und.neighbors(current):
+                if nb not in visited:
+                    visited.add(nb)
+                    next_frontier.append(nb)
+        ring = set()
+        for nb in next_frontier:
+            for sub in (nb, *tc.predecessors(nb)):
                 s = str(sub)
-                if s in candidates and s not in pos_descendants and s not in seen:
-                    seen.add(s)
-                    selected.append(s)
-                    if len(selected) >= max_samples:
-                        return selected
-        if len(selected) >= max_samples:
-            break
+                if s in candidates and s not in pos_descendants:
+                    ring.add(s)
+        ring -= set(selected)
+        ranked = sorted(ring, key=lambda cid: (_heavy_atom_count(cid), cid))
+        selected += ranked[: max_samples - len(selected)]
+        frontier = next_frontier
     return selected
 
 
@@ -163,7 +172,8 @@ def gather_class_examples(chebi_id: str, max_pos: int, max_neg: int) -> tuple[li
     globally — see :func:`valid_molecule_ids`). Positives are the **smallest**
     descendant molecules (fewest heavy atoms) so the minimal core motif is exposed;
     negatives are the molecules **closest to the class in the hierarchy** but not
-    below it (near-misses), topped up with random negatives only if the
+    below it (near-misses), smallest first within each hierarchy distance, topped
+    up with random negatives only if the
     neighbourhood yields fewer than requested.
     """
     import random

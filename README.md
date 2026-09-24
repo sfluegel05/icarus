@@ -56,6 +56,13 @@ This extends the per-class ChEBI approach in `../chebILP` to arbitrary molecules
      editable box once you seed from a ChEBI class — edit it and the edited text is
      what the model sees (in place of the original ChEBI definition). Predicates the
      pipeline writes are kept in a session-local library and reused across learns.
+     A ChEBI class that already has a stored hypothesis (`hypotheses.json`) is served
+     from the library without a new model call (rescored on the current examples).
+   - **Library-augmented background (Popper / Aleph)** — when the concept has a
+     definition, the `ICARUS_ILP_LIBRARY_TOP_N` (default 8) library predicates most
+     relevant to it (chebILP's `HybridPredicateRetriever`, BM25 over name +
+     definition) are grounded on the session molecules and offered as extra body
+     predicates; a learned rule using them carries their definitions along.
    The rule is shown alongside its **natural-language translation** (chebILP `rule_to_nl`),
    with a confusion matrix and the molecules **"not classified as told"** (false
    positives / negatives). Every molecule the rule marks positive gets a **"?"**

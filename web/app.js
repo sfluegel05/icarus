@@ -71,6 +71,7 @@ function render(state) {
   const pos = state.molecules.filter((m) => m.label === "pos");
   const neg = state.molecules.filter((m) => m.label === "neg");
 
+  renderLlmModel(state.llm_model);
   $("pos-count").textContent = pos.length;
   $("neg-count").textContent = neg.length;
   $("counts").textContent =
@@ -204,6 +205,7 @@ function renderConcept(concept) {
 $("concept-def").addEventListener("change", async () => {
   try {
     await api("/api/concept/definition", { definition: $("concept-def").value });
+    loadPredicates();  // retrieval of generated predicates runs against the definition
   } catch (e) { /* toast already shown */ }
 });
 
@@ -222,13 +224,16 @@ function renderStructGrid(container, mols, hasRule) {
       ? `<button class="explain-btn" data-id="${m.id}" title="Why is this positive?">?</button>` : "";
     const card = document.createElement("div");
     card.className = "struct-card";
+    card.draggable = true;
+    card.dataset.id = m.id;
+    card.dataset.label = m.label;
     card.innerHTML = `
       ${badge}
       <div class="card-ctrls">
         <button class="mini-btn swap ${other}" data-id="${m.id}" data-to="${other}" title="Move to ${other === "pos" ? "positive" : "negative"}">${swap}</button>
         <button class="mini-btn x" data-id="${m.id}" title="remove">×</button>
       </div>
-      <div class="thumb"><img loading="lazy" src="${depictUrl(m, 120, 100)}" alt=""></div>
+      <div class="thumb"><img loading="lazy" draggable="false" src="${depictUrl(m, 120, 100)}" alt=""></div>
       ${explain}
       <div class="cap" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</div>`;
     card.addEventListener("click", (e) => {
@@ -324,7 +329,8 @@ function openModal(id) {
   if (!m) return;
   const other = m.label === "pos" ? "neg" : "pos";
   const moveLabel = other === "pos" ? "→ Move to positive" : "→ Move to negative";
-  $("modal-struct").innerHTML = `<img src="${depictUrl(m, 420, 220)}" alt="">`;
+  $("modal-struct").innerHTML =
+    `<img src="${depictUrl(m, 420, 220)}" alt=""><span class="zoom-hint">hover to zoom · scroll to adjust</span>`;
   $("modal-body").innerHTML = `
     <h3>${escapeHtml(m.name)}</h3>
     ${m.chebi_id ? detailRow("ChEBI ID", chebiLink(m.chebi_id), { html: true }) : ""}
@@ -345,6 +351,36 @@ function openModal(id) {
   };
   $("modal").classList.remove("hidden");
 }
+// Hover-zoom on the structure: magnify in place around the cursor (Amazon-style).
+// The depiction is an SVG, so it stays crisp at any scale. Wheel adjusts the zoom.
+let structZoom = 2.5;
+(() => {
+  const box = $("modal-struct");
+  const img = () => box.querySelector("img");
+  const apply = (e) => {
+    const el = img();
+    if (!el || !el.offsetWidth) return;
+    const r = box.getBoundingClientRect();
+    // offset* are untransformed layout coords, relative to the box
+    const x = (e.clientX - r.left - el.offsetLeft) / el.offsetWidth;
+    const y = (e.clientY - r.top - el.offsetTop) / el.offsetHeight;
+    const clamp = (v) => Math.min(1, Math.max(0, v)) * 100;
+    el.style.transformOrigin = `${clamp(x)}% ${clamp(y)}%`;
+    el.style.transform = `scale(${structZoom})`;
+  };
+  box.addEventListener("mouseenter", (e) => { box.classList.add("zooming"); apply(e); });
+  box.addEventListener("mousemove", apply);
+  box.addEventListener("mouseleave", () => {
+    box.classList.remove("zooming");
+    const el = img();
+    if (el) el.style.transform = "";
+  });
+  box.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    structZoom = Math.min(8, Math.max(1.25, structZoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    apply(e);
+  }, { passive: false });
+})();
 $("modal-close").onclick = () => $("modal").classList.add("hidden");
 $("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") $("modal").classList.add("hidden");
@@ -408,7 +444,8 @@ $("fill-btn").onclick = async () => {
     max_pos: parseInt($("max-pos").value),
     max_neg: parseInt($("max-neg").value),
   });
-  render(data); toast(data.message);
+  // The generated predicates offered as blocks depend on the class.
+  loadPredicates().finally(() => { render(data); toast(data.message); });
 };
 
 // ── add molecules via SMILES/InChI ─────────────────────────────────────────
@@ -439,6 +476,42 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+// Drag example cards between the positive and negative columns.
+document.addEventListener("dragstart", (e) => {
+  const card = e.target.closest && e.target.closest(".struct-card");
+  if (!card) return;
+  e.dataTransfer.setData("text/x-icarus-mol", JSON.stringify({ id: card.dataset.id, label: card.dataset.label }));
+  e.dataTransfer.effectAllowed = "move";
+  card.classList.add("drag-src");
+});
+document.addEventListener("dragend", (e) => {
+  const card = e.target.closest && e.target.closest(".struct-card");
+  if (card) card.classList.remove("drag-src");
+  document.querySelectorAll(".example-col.drop-target").forEach((c) => c.classList.remove("drop-target"));
+});
+[["pos-col", "pos"], ["neg-col", "neg"]].forEach(([cls, label]) => {
+  const col = document.querySelector(`.${cls}`);
+  col.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer.types.includes("text/x-icarus-mol")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    col.classList.add("drop-target");
+  });
+  col.addEventListener("dragleave", (e) => {
+    if (!col.contains(e.relatedTarget)) col.classList.remove("drop-target");
+  });
+  col.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    col.classList.remove("drop-target");
+    const raw = e.dataTransfer.getData("text/x-icarus-mol");
+    if (!raw) return;
+    const { id, label: from } = JSON.parse(raw);
+    if (from === label) return;
+    const data = await api("/api/session/set_label", { id, label });
+    render(data);
+  });
+});
+
 // ── suggestions (one-by-one / tinder) ───────────────────────────────────────
 let queue = [];
 let qIdx = 0;
@@ -452,6 +525,7 @@ $("suggest-btn").onclick = async () => {
     queue = data.candidates || [];
     qIdx = 0;
     showCurrent();
+    revealSuggestions();
   } finally {
     $("suggest-btn").textContent = "Find similar molecules";
     $("suggest-btn").disabled = false;
@@ -491,15 +565,96 @@ async function decide(label) {
   }
   qIdx++;
   showCurrent();
+  // Accepting grows the examples above, pushing the card down — bring it back.
+  revealSuggestions();
 }
-$("t-pos").onclick = () => decide("pos");
-$("t-neg").onclick = () => decide("neg");
+
+// Show the end of the suggestions card, keeping the candidate card's top visible.
+function revealSuggestions() {
+  const t = $("tinder");
+  const section = t.closest("section");
+  revealEnd(section, t.classList.contains("hidden") ? section : t);
+}
+$("t-pos").onclick = () => swipeOut("pos");
+$("t-neg").onclick = () => swipeOut("neg");
 $("t-skip").onclick = () => decide(null);
+
+// Swipe the suggestion card: left = positive, right = negative.
+const SWIPE_THRESHOLD = 110;
+let swipe = null;
+let swiping = false;
+
+function setSwipeOffset(dx) {
+  const card = $("tinder-card");
+  card.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`;
+  const stage = $("tinder-stage");
+  stage.querySelector(".swipe-zone.pos").classList.toggle("armed", dx <= -SWIPE_THRESHOLD);
+  stage.querySelector(".swipe-zone.neg").classList.toggle("armed", dx >= SWIPE_THRESHOLD);
+}
+
+function resetSwipe() {
+  $("tinder-card").classList.remove("dragging");
+  $("tinder-stage").classList.remove("swiping");
+  setSwipeOffset(0);
+}
+
+async function swipeOut(label) {
+  if (swiping || qIdx >= queue.length) return;
+  swiping = true;
+  const card = $("tinder-card");
+  card.classList.remove("dragging");
+  $("tinder-stage").classList.remove("swiping");
+  setSwipeOffset(label === "pos" ? -500 : 500);
+  card.style.opacity = "0";
+  try {
+    await new Promise((r) => setTimeout(r, 220));
+    await decide(label);
+  } finally {
+    card.style.transition = "none";
+    card.style.opacity = "";
+    setSwipeOffset(0);
+    card.offsetHeight; // flush so the reset does not animate
+    card.style.transition = "";
+    swiping = false;
+  }
+}
+
+$("tinder-card").addEventListener("pointerdown", (e) => {
+  if (swiping || e.button !== 0 || e.target.closest("a")) return;
+  swipe = { x: e.clientX, id: e.pointerId, dx: 0 };
+  $("tinder-card").setPointerCapture(e.pointerId);
+  $("tinder-card").classList.add("dragging");
+  $("tinder-stage").classList.add("swiping");
+});
+$("tinder-card").addEventListener("pointermove", (e) => {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  swipe.dx = e.clientX - swipe.x;
+  setSwipeOffset(swipe.dx);
+});
+function endSwipe(e) {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  const dx = swipe.dx;
+  swipe = null;
+  if (Math.abs(dx) >= SWIPE_THRESHOLD) swipeOut(dx < 0 ? "pos" : "neg");
+  else resetSwipe();
+}
+$("tinder-card").addEventListener("pointerup", endSwipe);
+$("tinder-card").addEventListener("pointercancel", endSwipe);
+$("tinder-card").addEventListener("dragstart", (e) => e.preventDefault());
 
 // ── learn (background learner run with live output) ─────────────────────────
 let learnPoll = null;
 
 const METHOD_LABELS = { popper: "Popper", aleph: "Aleph", llm: "LLM" };
+
+// Name the configured model in the method selector (and live-output title).
+function renderLlmModel(model) {
+  if (!model) return;
+  const label = `LLM (${model})`;
+  const opt = document.querySelector('#learn-method option[value="llm"]');
+  if (opt) opt.textContent = label;
+  METHOD_LABELS.llm = label;
+}
 
 // The timeout only bounds the ILP searches; the LLM call is bounded by the CLI.
 $("learn-method").addEventListener("change", () => {
@@ -516,6 +671,7 @@ $("learn-btn").onclick = async () => {
   document.querySelector(".lp-title").textContent = `${label} output`;
   $("learn-tail").textContent = "starting…";
   $("learn-full").textContent = "";
+  revealEnd($("learn-progress"));
   try {
     await api("/api/learn", { method, timeout: parseInt($("timeout").value) });
   } catch (err) {
@@ -549,9 +705,25 @@ async function pollLearn() {
         render(p.state);
         toast(p.message);
         if (queue.length) showCurrent();  // refresh predictions on the visible candidate
+        // Show the learned rule; the output panel stays visible above it if it fits.
+        requestAnimationFrame(() =>
+          revealEnd($("rule-area").closest("section"), $("learn-progress")));
       });
     }
   }
+}
+
+// Scroll the window down just enough to bring `el`'s bottom into view, but never
+// so far that `topEl`'s top slides under the sticky header. Never scrolls up.
+function revealEnd(el, topEl = el) {
+  if (!el || el.classList.contains("hidden")) return;
+  const header = document.querySelector("header");
+  const headerH = header ? header.getBoundingClientRect().height : 0;
+  const pad = 12;
+  const overflow = el.getBoundingClientRect().bottom + pad - window.innerHeight;
+  const room = topEl.getBoundingClientRect().top - headerH - pad;
+  const dy = Math.min(overflow, room);
+  if (dy > 0) window.scrollBy({ top: dy, behavior: "smooth" });
 }
 
 function autoScroll(el) {
@@ -635,6 +807,7 @@ function renderChanges(changed) {
 $("reset-btn").onclick = async () => {
   const data = await api("/api/session/reset", {});
   render(data);
+  loadPredicates();  // no class any more → no class-specific generated predicates
   queue = []; qIdx = 0;
   $("tinder").classList.add("hidden");
   $("tinder-empty").textContent = "";

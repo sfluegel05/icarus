@@ -13,6 +13,8 @@ ChEBI class we start from that class's real definition/siblings; the user can ed
 the definition text in the UI, and the edited text is what reaches the model here
 (``info['definition']``). The pipeline stores every predicate it writes in a
 session-local library (``config.LLM_LIBRARY_DIR``), so later learns can reuse them.
+The library also acts as a cache: a ChEBI class that already has a stored hypothesis
+is assembled from it without calling the model again.
 
 After the pipeline runs we read the kept auxiliary rules and the class hypothesis
 back out and assemble one self-contained rule — the auxiliary clauses followed by
@@ -100,8 +102,8 @@ class _SessionRuleGenerator(RuleGenerator):
         """Same ctx the parent builds, but over the session molecules rather than a
         class's on-disk train ``exs.pl`` (mirrors ``RuleGenerator.class_context``)."""
         pos_rows, neg_rows = self._pos_rows, self._neg_rows
-        val_facts, val_ids = _build_eval_facts(
-            pd.concat([pos_rows, neg_rows]), self.computed_facts)
+        val_rows = pd.concat([pos_rows, neg_rows])
+        val_facts, val_ids = _build_eval_facts(val_rows, self.computed_facts)
         smiles_by_id = {}
         for rows in (pos_rows, neg_rows):
             for idx, mol in zip(rows.index, rows["mol"]):
@@ -114,6 +116,7 @@ class _SessionRuleGenerator(RuleGenerator):
             "smiles_by_id": smiles_by_id,
             "val_facts": val_facts,
             "val_ids": val_ids,
+            "val_rows": val_rows,
             "pos_ids": {str(i) for i in pos_rows.index},
             # Feedback-round bookkeeping (filled by repair; read back by prepare).
             "excluded_labels": set(),
@@ -180,9 +183,20 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None) -
                 "error": "Need at least one positive and one negative example."}
 
     chebi_id, info = _build_info(concept or {})
-    pos_rows, neg_rows = _rows(pos_mols), _rows(neg_mols)
-
     library_dir = config.LLM_LIBRARY_DIR
+
+    # The library doubles as a cache: a ChEBI class that already has a stored
+    # hypothesis is served from it instead of a new model call. (Not for the generic
+    # id, which every ad-hoc SMILES-only concept shares.)
+    if chebi_id != _GENERIC_ID and os.path.isdir(library_dir):
+        cached = _stored_result(chebi_id, library_dir)
+        if cached is not None:
+            on_line(f"Using the stored hypothesis for CHEBI:{chebi_id} from the rule library "
+                    "(no LLM call).")
+            cached["score"] = _session_score(cached["rule"], pos_mols, neg_mols)
+            return cached
+
+    pos_rows, neg_rows = _rows(pos_mols), _rows(neg_mols)
     os.makedirs(library_dir, exist_ok=True)
     problem_dir = os.path.join(config.WORK_DIR, "llm_problems")  # unused (class_context overridden)
 
@@ -190,7 +204,6 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None) -
         library_dir, model, config.LLM_N_PREDICATES, config.LLM_TOP_K,
         molecules=pd.concat([pos_rows, neg_rows]), problem_dir=problem_dir,
         computed_facts=config.LLM_COMPUTED_FACTS, prompt_samples=config.LLM_PROMPT_SAMPLES,
-        hypothesis_min_f1=config.LLM_HYPOTHESIS_MIN_F1,
         pos_rows=pos_rows, neg_rows=neg_rows,
     )
     gen.retriever = gen.build_retriever()
@@ -206,13 +219,26 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None) -
         return {"rule": None, "score": None, "error": f"LLM pipeline failed: {e}"}
 
     # Read the pipeline's stored result back out and assemble the icarus rule.
-    programs = load_class_rules(chebi_id, library_dir=library_dir)
-    dependencies = resolve_rule_dependencies(programs, library_dir)
+    result = _stored_result(chebi_id, library_dir)
+    if result is None:
+        return {"rule": None, "score": None,
+                "error": "The pipeline did not produce a usable hypothesis."}
+    return result
+
+
+def _stored_result(chebi_id: str, library_dir: str) -> dict | None:
+    """The class's stored hypothesis (``hypotheses.json``) assembled with its auxiliary
+    rules (``class_map.json`` + dependencies) into ``{"rule", "score"}``, or ``None``
+    if the library holds no hypothesis for the class."""
     hyp_entry = load_class_hypothesis(chebi_id, library_dir=library_dir) or {}
     hypothesis = (hyp_entry.get("hypothesis") or "").strip()
     if not hypothesis:
-        return {"rule": None, "score": None,
-                "error": "The pipeline did not produce a usable hypothesis."}
+        return None
+    try:
+        programs = load_class_rules(chebi_id, library_dir=library_dir)
+    except FileNotFoundError:
+        programs = []
+    dependencies = resolve_rule_dependencies(programs, library_dir)
 
     rule = _assemble_rule(programs + dependencies, hypothesis, chebi_id)
     score = None
@@ -220,3 +246,17 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None) -
         score = {"TP": hyp_entry["tp"], "FN": hyp_entry["fn"],
                  "TN": hyp_entry["tn"], "FP": hyp_entry["fp"]}
     return {"rule": rule, "score": score}
+
+
+def _session_score(rule: str, pos_mols, neg_mols) -> dict | None:
+    """Confusion counts of ``rule`` on the current session examples (a cached
+    hypothesis's stored score refers to the examples it was generated on)."""
+    from . import ilp
+
+    try:
+        preds = ilp.classify(rule, list(pos_mols) + list(neg_mols))
+    except ilp.RuleError:
+        return None
+    tp = sum(preds[m.id] for m in pos_mols)
+    fp = sum(preds[m.id] for m in neg_mols)
+    return {"TP": tp, "FN": len(pos_mols) - tp, "TN": len(neg_mols) - fp, "FP": fp}

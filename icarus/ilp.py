@@ -18,6 +18,7 @@ import pandas as pd
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_problem_builder import build_background_chemlog
+from chebILP.utils import split_prolog_literals
 
 from . import config
 
@@ -37,6 +38,102 @@ def build_background(mols) -> tuple[list[str], list[tuple[str, int]]]:
     rows = _rows(mols)
     lines, body_predicates = build_background_chemlog(rows, predicate_set="atoms")
     return lines, body_predicates
+
+
+def _library_query(concept) -> str | None:
+    """Retrieval query for the concept (``name + definition``, as chebILP's generator
+    builds it), or ``None`` when there is no definition to retrieve against."""
+    concept = concept or {}
+    definition = (concept.get("definition") or "").strip()
+    if not definition:
+        return None
+    return f"{concept.get('name') or ''} {definition}".strip()
+
+
+def retrieve_library_programs(concept) -> list:
+    """The ``config.ILP_LIBRARY_TOP_N`` session-library rule programs most relevant to
+    the concept's definition, best first (chebILP's ``HybridPredicateRetriever``).
+
+    Empty when the concept has no definition or the library has no programs yet.
+    """
+    query = _library_query(concept)
+    lib = config.LLM_LIBRARY_DIR
+    if not query or config.ILP_LIBRARY_TOP_N <= 0 or not os.path.isdir(os.path.join(lib, "programs")):
+        return []
+    from chebILP.molecule_processing.fg_matching import is_fg_seed_name
+    from chebILP.predicate_generation.auxiliary_rules import aux_rule_path, parse_rule_program
+    from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
+
+    # BM25-only, like the LLM path: no sentence-transformers model download.
+    retriever = HybridPredicateRetriever.from_rule_library(base_dir=lib, use_dense=False)
+    programs = []
+    for entry in retriever.retrieve(query, top_k=config.ILP_LIBRARY_TOP_N):
+        # Seeded FG predicates are RDKit matches, not ASP rules; icarus can't ground them.
+        if is_fg_seed_name(entry["name"]):
+            continue
+        path = aux_rule_path(entry["stem"], lib)
+        try:
+            with open(path, encoding="utf-8") as f:
+                prog = parse_rule_program(f.read(), source_file=path)
+        except OSError:
+            continue
+        if prog is not None:
+            programs.append(prog)
+    return programs
+
+
+def library_background(bk_lines, mols, concept, on_line=None) -> tuple[list[str], list[tuple[str, int]]]:
+    """Extra background facts + (predicate, arity) list from the session rule library.
+
+    Retrieves the library predicates most relevant to the concept definition, grounds
+    them (plus the library programs they build on) over the atom-level ``bk_lines`` and
+    emits the derived ``aux_*`` facts — mirroring chebILP's ``llm_generated_rules``
+    background, where dependencies are ground alongside but only the selected
+    predicates become ILP features. Predicates that hold for no session molecule are
+    dropped. Degrades to ``([], [])`` on any failure.
+    """
+    log = on_line or (lambda _line: None)
+    try:
+        programs = retrieve_library_programs(concept)
+        if not programs:
+            return [], []
+        from chebILP.predicate_generation.auxiliary_rules import (
+            derive_rule_extensions, predicate_arg_sorts, resolve_rule_dependencies,
+        )
+
+        deps = resolve_rule_dependencies(programs, config.LLM_LIBRARY_DIR)
+        extensions = derive_rule_extensions(programs + deps, bk_lines, [m.id for m in mols])
+    except Exception as e:
+        log(f"Rule library: retrieval/grounding failed ({e}); using the atom-level background only.")
+        return [], []
+
+    lines, preds = [], []
+    for prog in programs:
+        arity = len(predicate_arg_sorts(prog))
+        emitted = []
+        for arg_tuples in extensions.get(prog.name, {}).values():
+            for args in arg_tuples:
+                line = f"{prog.name}({','.join(args)})."
+                if line not in emitted:
+                    emitted.append(line)
+        if not arity or not emitted:
+            continue
+        lines += emitted
+        preds.append((prog.name, arity))
+    if preds:
+        log(f"Rule library: added {len(preds)} retrieved predicate(s) to the background: "
+            + ", ".join(f"{n}/{a}" for n, a in preds))
+    else:
+        log("Rule library: no retrieved predicate holds for any session molecule.")
+    return lines, preds
+
+
+def build_learning_background(mols, concept=None, on_line=None) -> tuple[list[str], list[tuple[str, int]]]:
+    """The background an ILP learner sees: atom-level facts, augmented with the
+    library predicates retrieved for the concept definition (if there is one)."""
+    lines, body_predicates = build_background(mols)
+    extra_lines, extra_preds = library_background(lines, mols, concept, on_line)
+    return lines + extra_lines, list(body_predicates) + extra_preds
 
 
 def _bias_body_predicates(body_predicates) -> list[tuple[str, int]]:
@@ -69,15 +166,18 @@ def _bias_lines(body_predicates) -> list[str]:
     return lines
 
 
-def write_problem(work_dir, pos_mols, neg_mols):
-    """Write exs.pl, bk.pl and bias.pl for the labelled molecules. Returns paths."""
+def write_problem(work_dir, pos_mols, neg_mols, concept=None, on_line=None):
+    """Write exs.pl, bk.pl and bias.pl for the labelled molecules. Returns paths.
+
+    With a concept definition, the background is augmented with retrieved library
+    predicates (see :func:`build_learning_background`)."""
     os.makedirs(work_dir, exist_ok=True)
     exs_path = os.path.join(work_dir, "exs.pl")
     bk_path = os.path.join(work_dir, "bk.pl")
     bias_path = os.path.join(work_dir, "bias.pl")
 
     all_mols = pos_mols + neg_mols
-    bk_lines, body_predicates = build_background(all_mols)
+    bk_lines, body_predicates = build_learning_background(all_mols, concept, on_line)
 
     with open(exs_path, "w") as f:
         for m in pos_mols:
@@ -133,7 +233,7 @@ print("{_RESULT_MARKER}" + json.dumps({{"prog_str": prog_str, "score": list(scor
 '''
 
 
-def learn_streaming(pos_mols, neg_mols, timeout, on_line) -> dict:
+def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
     """Run noisy (MDL) Popper, streaming its stdout line-by-line via ``on_line``.
 
     Returns ``{"rule": str|None, "score": {...}|None}`` (or an ``error``). The
@@ -144,7 +244,8 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line) -> dict:
                 "error": "Need at least one positive and one negative example."}
 
     timeout = timeout or config.DEFAULT_TIMEOUT
-    exs_path, bk_path, bias_path = write_problem(config.WORK_DIR, pos_mols, neg_mols)
+    exs_path, bk_path, bias_path = write_problem(config.WORK_DIR, pos_mols, neg_mols,
+                                                 concept=concept, on_line=on_line)
     # Noisy: Popper minimises an MDL cost, returning the best rule found even when none
     # perfectly separates the examples (rather than failing to return one).
     settings = {"timeout": timeout, "noisy": True}
@@ -182,14 +283,21 @@ def learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model=None, con
     {TP,FN,TN,FP}|None, "error"?: str}`` — with a rule head of ``TARGET``, so the
     caller (and everything downstream: classify, NL, explain) is method-agnostic.
     ``on_line`` receives progress lines for the live log. ``concept`` (name / chebi_id
-    / editable definition) is used only by the LLM pipeline's prompt.
+    / editable definition) feeds the LLM pipeline's prompt and, for Popper / Aleph,
+    the retrieval of library predicates that augment the background.
     """
-    if method == "popper":
-        return learn_streaming(pos_mols, neg_mols, timeout, on_line)
-    if method == "aleph":
-        from . import aleph
+    if method in ("popper", "aleph"):
+        if method == "popper":
+            result = learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=concept)
+        else:
+            from . import aleph
 
-        return aleph.learn_streaming(pos_mols, neg_mols, timeout, on_line)
+            result = aleph.learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=concept)
+        # A rule over retrieved library predicates carries only their literals; pull in
+        # their definitions so it is self-contained for classify / NL / explain.
+        if result.get("rule"):
+            result["rule"] = expand_aux_definitions(result["rule"])
+        return result
     if method == "llm":
         from . import llm_rulegen
 
@@ -343,6 +451,74 @@ def rule_to_nl(rule: str) -> str | None:
     return _translate_one(rule)
 
 
+_ANON_VAR_RE = re.compile(r"(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])")
+
+
+def _name_anonymous_vars(clause: str) -> str:
+    """Replace each anonymous ``_`` in a positive body literal with a fresh named variable.
+
+    xclingo copies positive body literals into the heads of its generated
+    support rules, where an anonymous variable becomes unsafe and grounding
+    fails. A variable that occurs only once has the same meaning as ``_``.
+    Negated literals keep their ``_``: there a named variable would be unsafe.
+    """
+    if ":-" not in clause:
+        return clause
+    head, body = clause.split(":-", 1)
+    counter = iter(range(1, 1_000_000))
+    lits = [lit if lit.startswith("not ")
+            else _ANON_VAR_RE.sub(lambda _m: f"AnonV{next(counter)}", lit)
+            for lit in split_prolog_literals(body.strip().rstrip("."))]
+    return f"{head.strip()} :- {', '.join(lits)}."
+
+
+def _xclingo_ready_rule(smiles: str, rule: str, mol_id: str) -> str:
+    """Rewrite ``rule`` into a form chebILP's xclingo explainer can handle.
+
+    Anonymous variables in positive body literals get names, and every clause
+    with an aggregate (``#count`` etc.) is replaced by the ground facts it
+    derives for this molecule: xclingo finds no explanation at all through an
+    aggregate, so such a predicate is cited as a given property instead (for a
+    target clause, via a helper predicate the target is bridged to). Target
+    clauses come last. Returns one clause per line, as chebILP parses the rule
+    line by line.
+    """
+    import clingo
+    from rdkit import Chem
+
+    clauses = _split_clauses(rule)
+    agg = [c for c in clauses if ":-" in c and "#" in c.split(":-", 1)[1]]
+    # Aggregate clauses are ground by plain clingo below, so they keep their ``_``.
+    clauses = [c if c in agg else _name_anonymous_vars(c) for c in clauses]
+    # chebILP explains the head of the last clause, so the target clauses go last.
+    clauses.sort(key=lambda c: _clause_head(c) == TARGET)
+    mol = Chem.MolFromSmiles(smiles)
+    if not agg or mol is None:  # invalid SMILES: let chebILP raise its error
+        return "\n".join(clauses)
+
+    # A target clause is not replaced by facts itself (chebILP would then explain some
+    # other predicate): its aggregate body becomes a helper, the target a bridge to it.
+    helper = f"aux_{TARGET}_condition"
+    target_agg = [c for c in agg if _clause_head(c) == TARGET]
+    agg_facts_src = [re.sub(rf"^\s*{TARGET}\s*\(", f"{helper}(", c, count=1) if c in target_agg else c
+                     for c in agg]
+
+    # Same background chebILP's explainer builds, so atom ids line up.
+    mol_df = pd.DataFrame([{"mol": mol}], index=[mol_id])
+    bk_lines, _ = build_background_chemlog(mol_df)
+    ctl = clingo.Control(["--warn=none"])
+    ctl.add("base", [], "\n".join(bk_lines + [c for c in clauses if c not in agg] + agg_facts_src))
+    ctl.ground([("base", [])])
+    agg_heads = {_clause_head(c) for c in agg_facts_src}
+    facts: list[str] = []
+    with ctl.solve(yield_=True) as handle:
+        for model in handle:
+            facts = sorted(f"{s}." for s in model.symbols(atoms=True) if s.name in agg_heads)
+            break
+    bridge = [f"{TARGET}(M) :- {helper}(M)."] if target_agg else []
+    return "\n".join(facts + [c for c in clauses if c not in agg] + bridge)
+
+
 def explain_molecule(smiles: str, rule: str) -> dict:
     """Graphical + textual explanation of why the rule classifies a molecule positive.
 
@@ -354,14 +530,15 @@ def explain_molecule(smiles: str, rule: str) -> dict:
 
     from chebILP.explainability.explain import explain_molecule as _explain
 
-    satisfies, text, img = _explain(smiles, rule, mol_id="mol1")
+    satisfies, text, img = _explain(smiles, _xclingo_ready_rule(smiles, rule, "mol1"), mol_id="mol1")
 
     # The generic target predicate is "concept"; rewrite chebILP's CHEBI-oriented
     # phrasing into concept-neutral text.
     if satisfies:
         marker = "because it satisfies the following conditions:"
         conds = text.split(marker, 1)[1].strip() if marker in text else ""
-        text = "This molecule matches the learned concept because it satisfies:\n" + conds
+        text = ("This molecule matches the learned concept because it satisfies:\n" + conds
+                if conds else "This molecule matches the learned concept.")
     else:
         text = "This molecule does not match the learned concept."
 

@@ -111,13 +111,16 @@ LLM_PROMPT_SAMPLES = int(os.environ.get("ICARUS_LLM_PROMPT_SAMPLES", "8"))
 # Session-local shared library the LLM pipeline writes/reuses auxiliary rules in
 # (the real chebILP pipeline retrieves reuse candidates from it across learns).
 LLM_LIBRARY_DIR = os.path.join(ICARUS_DATA, "rule_library")
+# Popper / Aleph background augmentation: when the concept has a definition, the
+# N library predicates most relevant to it (chebILP's HybridPredicateRetriever over
+# name + definition) are grounded on the session molecules and offered as extra
+# body predicates. 0 disables the augmentation.
+ILP_LIBRARY_TOP_N = int(os.environ.get("ICARUS_ILP_LIBRARY_TOP_N", "8"))
 # Offer mol_weight / ring_size facts to the model. Kept OFF so every predicate the
 # model writes grounds against icarus's standard atom-level background (the same
 # bk the classify step builds); otherwise a rule using those facts would silently
 # never fire at inference time.
 LLM_COMPUTED_FACTS = False
-# Train-F1 below which the class hypothesis gets one feedback round.
-LLM_HYPOTHESIS_MIN_F1 = float(os.environ.get("ICARUS_LLM_MIN_F1", "0.7"))
 
 
 # External data files this app reads (everything else it generates itself). Kept

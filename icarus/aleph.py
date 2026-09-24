@@ -30,14 +30,15 @@ _HEAD_ID = "0"
 _HEAD_NAME = f"chebi_{_HEAD_ID}"
 
 
-def _write_problem(work_dir, pos_mols, neg_mols):
+def _write_problem(work_dir, pos_mols, neg_mols, concept=None, on_line=None):
     """Write the Aleph ``.b`` / ``.f`` / ``.n`` stem files and a bias file.
 
     Returns ``(aleph_stem, bias_path)``. The background and the (bias-filtered,
     low-arity) body predicates are exactly those the Popper path learns over, so
-    the two backends see the same problem."""
+    the two backends see the same problem (including any library predicates
+    retrieved for the concept definition)."""
     os.makedirs(work_dir, exist_ok=True)
-    bk_lines, body_predicates = ilp.build_background(pos_mols + neg_mols)
+    bk_lines, body_predicates = ilp.build_learning_background(pos_mols + neg_mols, concept, on_line)
     learnable = ilp._bias_body_predicates(body_predicates)
 
     stem = os.path.join(work_dir, "aleph_problem")
@@ -64,7 +65,7 @@ def _rewrite_head(rule: str | None) -> str | None:
     return re.sub(rf"\b{re.escape(_HEAD_NAME)}\b", TARGET, rule)
 
 
-def learn_streaming(pos_mols, neg_mols, timeout, on_line) -> dict:
+def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
     """Run Aleph on the labelled molecules, mirroring ``ilp.learn_streaming``.
 
     Aleph's engine is driven by a blocking subprocess that self-terminates within
@@ -78,7 +79,8 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line) -> dict:
                 "error": "Need at least one positive and one negative example."}
 
     timeout = timeout or config.DEFAULT_TIMEOUT
-    stem, bias_path = _write_problem(config.WORK_DIR, pos_mols, neg_mols)
+    stem, bias_path = _write_problem(config.WORK_DIR, pos_mols, neg_mols,
+                                     concept=concept, on_line=on_line)
 
     on_line(f"Running Aleph via SWI-Prolog (up to {timeout}s)…")
     # icarus's Popper path is non-noisy — it must find a perfectly-separating rule — so run

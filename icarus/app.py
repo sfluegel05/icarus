@@ -9,6 +9,7 @@ A single in-memory session drives the whole flow:
 """
 
 import contextlib
+import re
 import threading
 import traceback
 
@@ -103,6 +104,8 @@ def state_dict() -> dict:
             "chebi_id": SESSION.concept_chebi_id,
             "definition": SESSION.concept_definition,
         },
+        # Shown next to the "LLM" learn method, so it is clear which model runs.
+        "llm_model": config.LLM_MODEL,
     }
     if SESSION.current_rule:
         out["report"] = _report(preds)
@@ -187,13 +190,44 @@ async def api_state(request: Request):
         return ok()  # ok() refreshes predictions when a rule exists
 
 
+def _class_aux_names(concept, rule) -> set[str]:
+    """Library predicates relevant to the session's class: those retrieved for its
+    definition (the same retrieval that augments the ILP background), the class's
+    own generated predicates plus their dependencies, and any used by ``rule``."""
+    names = set(re.findall(r"\baux_[A-Za-z0-9_]*", rule or ""))
+    try:
+        names |= {p.name for p in ilp.retrieve_library_programs(concept)}
+    except Exception:
+        traceback.print_exc()
+    if concept.get("chebi_id"):
+        from chebILP.predicate_generation.auxiliary_rules import (
+            load_class_rules, resolve_rule_dependencies,
+        )
+
+        try:
+            programs = load_class_rules(str(concept["chebi_id"]),
+                                        library_dir=config.LLM_LIBRARY_DIR)
+            programs += resolve_rule_dependencies(programs, config.LLM_LIBRARY_DIR)
+            names |= {p.name for p in programs}
+        except FileNotFoundError:
+            pass
+        except Exception:
+            traceback.print_exc()
+    return names
+
+
 async def api_predicates(request: Request):
-    """The building-block catalog for the visual rule editor. ``aux`` grows as the
-    LLM pipeline writes generated predicates into the session library, so it is
-    read fresh on each request."""
+    """The building-block catalog for the visual rule editor. ``aux`` holds only the
+    library predicates relevant to the session's class (the library keeps growing
+    across classes), so it is computed fresh on each request."""
+    with SESSION.lock:
+        concept = {"name": SESSION.concept_name, "chebi_id": SESSION.concept_chebi_id,
+                   "definition": SESSION.concept_definition}
+        rule = SESSION.current_rule
     return JSONResponse({
         "catalog": predicates.catalog(),
-        "aux": predicates.aux_blocks(config.LLM_LIBRARY_DIR),
+        "aux": predicates.aux_blocks(config.LLM_LIBRARY_DIR,
+                                     names=_class_aux_names(concept, rule)),
         "target": config.TARGET_LABEL,
     })
 
@@ -313,7 +347,7 @@ LEARN = {"running": False, "done": False, "error": None, "lines": [],
          "message": None, "score": None, "method": config.DEFAULT_LEARN_METHOD}
 
 # How each method is named in the UI's live-output panel and status messages.
-_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": "LLM"}
+_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": f"LLM ({config.LLM_MODEL})"}
 
 
 def _learn_worker(pos, neg, timeout, method, model, concept):
@@ -493,13 +527,15 @@ async def _lifespan(app):
         print("[ICaRuS] data files located; ready.", flush=True)
         # Warm the reference-data caches up front (in a worker thread so the event
         # loop stays responsive) so class autocomplete works from the first
-        # keystroke instead of triggering a ~10s graph load on first search.
+        # keystroke instead of triggering a ~10s graph load and transitive-closure
+        # computation on first search.
         import asyncio
 
         async def _warm():
             try:
                 await asyncio.to_thread(data_store.graph)
                 await asyncio.to_thread(data_store.molecules)
+                await asyncio.to_thread(data_store.transitive_closure)
                 print("[ICaRuS] reference data preloaded.", flush=True)
             except Exception as exc:  # pragma: no cover - best-effort warmup
                 print(f"[ICaRuS] warmup failed: {exc}", flush=True)
@@ -508,5 +544,17 @@ async def _lifespan(app):
     yield
 
 
+class _RevalidatingStaticFiles(StaticFiles):
+    """Static files the browser must revalidate (cheap 304 via ETag) on every load.
+
+    Without a Cache-Control header browsers cache app.js heuristically, so after an
+    update they keep running the old script until a hard reload."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app = Starlette(routes=routes, lifespan=_lifespan)
-app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")
+app.mount("/static", _RevalidatingStaticFiles(directory=config.WEB_DIR), name="static")

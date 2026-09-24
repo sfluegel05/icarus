@@ -66,7 +66,10 @@
       </div>
 
       <div id="tinder" class="tinder hidden">
-        <div class="tinder-card">
+        <div id="tinder-stage" class="tinder-stage">
+        <div class="swipe-zone pos">+ Positive</div>
+        <div class="swipe-zone neg">− Negative</div>
+        <div id="tinder-card" class="tinder-card" title="Swipe left for positive, right for negative">
           <div class="tinder-meta-top">
             <span id="t-sim" class="t-sim"></span>
             <span id="t-pred" class="t-pred"></span>
@@ -78,10 +81,11 @@
             <div id="t-def" class="t-def"></div>
           </div>
         </div>
+        </div>
         <div class="tinder-actions">
-          <button id="t-neg" class="btn-neg big">− Negative</button>
-          <button id="t-skip" class="ghost big">Skip →</button>
-          <button id="t-pos" class="btn-pos big">+ Positive</button>
+          <button id="t-pos" class="btn-pos big">← + Positive</button>
+          <button id="t-skip" class="ghost big">Skip</button>
+          <button id="t-neg" class="btn-neg big">− Negative →</button>
         </div>
       </div>
       <div id="tinder-empty" class="muted"></div>

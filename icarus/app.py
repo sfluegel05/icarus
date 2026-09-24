@@ -121,11 +121,14 @@ def _int(v, default):
         return default
 
 
-def ok(**extra):
+def ok(recompute: bool = True, **extra):
     # Refresh predictions so any molecule added/relabelled since the last learn is
     # classified before the report is built — otherwise new molecules default to
-    # "negative" and skew the confusion matrix / mismatch list.
-    if SESSION.current_rule:
+    # "negative" and skew the confusion matrix / mismatch list. Relabel/remove can't
+    # change any prediction, so they pass recompute=False and skip clingo (unless
+    # some molecule has no prediction yet).
+    if SESSION.current_rule and (
+            recompute or any(mid not in SESSION.last_predictions for mid in SESSION.molecules)):
         try:
             recompute_predictions()
         except ilp.RuleError:
@@ -272,14 +275,15 @@ async def session_set_label(request: Request):
     body = await request.json()
     with SESSION.lock:
         SESSION.set_label(str(body.get("id")), body.get("label"))
-        return ok()
+        # A prediction depends only on structure + rule, never on the label.
+        return ok(recompute=False)
 
 
 async def session_remove(request: Request):
     body = await request.json()
     with SESSION.lock:
         SESSION.remove(str(body.get("id")))
-        return ok()
+        return ok(recompute=False)
 
 
 async def session_reset(request: Request):

@@ -286,6 +286,13 @@ def learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model=None, con
     / editable definition) feeds the LLM pipeline's prompt and, for Popper / Aleph,
     the retrieval of library predicates that augment the background.
     """
+    try:
+        return _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept)
+    finally:
+        _NL_CACHE.clear()  # the run may have changed library aux descriptions
+
+
+def _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept) -> dict:
     if method in ("popper", "aleph"):
         if method == "popper":
             result = learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=concept)
@@ -388,11 +395,23 @@ def _clause_head(clause: str) -> str | None:
     return m.group(1) if m else None
 
 
+# NL per rule text. The state is re-sent after every UI action (relabel, remove, …),
+# and re-translating an unchanged rule each time slowed those round-trips. Cleared
+# by ``learn_dispatch`` since a learn run may add/rewrite library aux descriptions.
+_NL_CACHE: dict[str, str | None] = {}
+
+
 def _translate_one(rule_text: str) -> str | None:
     """NL for a *single-head* rule via chebILP's ``translate_rule``, annotating any
     ``aux_`` references with their descriptions from the session predicate library."""
     if not rule_text:
         return None
+    if rule_text not in _NL_CACHE:
+        _NL_CACHE[rule_text] = _translate_uncached(rule_text)
+    return _NL_CACHE[rule_text]
+
+
+def _translate_uncached(rule_text: str) -> str | None:
     try:
         from chebILP.explainability.rule_to_nl import translate_rule
     except Exception:

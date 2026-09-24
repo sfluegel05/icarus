@@ -341,13 +341,13 @@ function openModal(id) {
       <button class="action-btn ${other}" data-act="move">${moveLabel}</button>
       <button class="action-btn remove" data-act="remove">× Remove</button>
     </div>`;
-  $("modal-body").querySelector('[data-act="move"]').onclick = async () => {
+  $("modal-body").querySelector('[data-act="move"]').onclick = () => {
     $("modal").classList.add("hidden");
-    render(await api("/api/session/set_label", { id: m.id, label: other }));
+    setLabel(m.id, other);
   };
-  $("modal-body").querySelector('[data-act="remove"]').onclick = async () => {
+  $("modal-body").querySelector('[data-act="remove"]').onclick = () => {
     $("modal").classList.add("hidden");
-    render(await api("/api/session/remove", { id: m.id }));
+    removeMolecule(m.id);
   };
   $("modal").classList.remove("hidden");
 }
@@ -461,18 +461,77 @@ document.querySelectorAll(".add-mol").forEach((btn) => {
   };
 });
 
+// ── optimistic relabel / remove ─────────────────────────────────────────────
+// Apply the change to the local state and re-render immediately, then sync with
+// the backend. Predictions don't depend on labels, so outcomes, counts and the
+// report can be recomputed locally. Only the reply to the latest mutation is
+// rendered, so a slow earlier reply can't overwrite a newer local change.
+let mutationSeq = 0;
+
+function outcomeOf(label, predicted) {
+  if (label === "pos") return predicted ? "TP" : "FN";
+  if (label === "neg") return predicted ? "FP" : "TN";
+  return predicted ? "pos_pred" : "neg_pred";
+}
+
+function recomputeLocal(state) {
+  const mols = state.molecules;
+  const nPos = mols.filter((m) => m.label === "pos").length;
+  const nNeg = mols.filter((m) => m.label === "neg").length;
+  state.counts = { pos: nPos, neg: nNeg, unlabeled: mols.length - nPos - nNeg };
+  if (!state.has_rule) return;
+  const conf = { TP: 0, FP: 0, TN: 0, FN: 0 };
+  const mismatches = [];
+  mols.forEach((m) => {
+    m.outcome = outcomeOf(m.label, !!m.prediction);
+    if (m.label !== "pos" && m.label !== "neg") return;
+    conf[m.outcome] += 1;
+    if (m.outcome === "FP" || m.outcome === "FN") {
+      mismatches.push({ id: m.id, name: m.name, smiles: m.smiles, label: m.label, outcome: m.outcome });
+    }
+  });
+  state.report = { confusion: conf, mismatches };
+}
+
+async function mutateMolecule(path, body, applyLocal) {
+  const seq = ++mutationSeq;
+  if (lastState) {
+    applyLocal(lastState);
+    recomputeLocal(lastState);
+    render(lastState);
+  }
+  try {
+    const data = await api(path, body);
+    if (seq === mutationSeq) render(data);
+  } catch (e) {
+    // The backend rejected it — resync to its truth (toast already shown).
+    if (seq === mutationSeq) api("/api/state").then(render).catch(() => {});
+  }
+}
+
+function setLabel(id, label) {
+  return mutateMolecule("/api/session/set_label", { id, label }, (s) => {
+    const m = s.molecules.find((x) => x.id === id);
+    if (m) m.label = label;
+  });
+}
+
+function removeMolecule(id) {
+  return mutateMolecule("/api/session/remove", { id }, (s) => {
+    s.molecules = s.molecules.filter((x) => x.id !== id);
+  });
+}
+
 // ── list interactions (swap / remove) ──────────────────────────────────────
-document.addEventListener("click", async (e) => {
+document.addEventListener("click", (e) => {
   const swap = e.target.closest(".swap");
   const x = e.target.closest(".x");
   if (x && x.classList.contains("mini-btn")) {
     e.stopPropagation();
-    const data = await api("/api/session/remove", { id: x.dataset.id });
-    render(data);
+    removeMolecule(x.dataset.id);
   } else if (swap && swap.classList.contains("mini-btn")) {
     e.stopPropagation();
-    const data = await api("/api/session/set_label", { id: swap.dataset.id, label: swap.dataset.to });
-    render(data);
+    setLabel(swap.dataset.id, swap.dataset.to);
   }
 });
 
@@ -507,8 +566,7 @@ document.addEventListener("dragend", (e) => {
     if (!raw) return;
     const { id, label: from } = JSON.parse(raw);
     if (from === label) return;
-    const data = await api("/api/session/set_label", { id, label });
-    render(data);
+    setLabel(id, label);
   });
 });
 
@@ -679,21 +737,32 @@ $("learn-btn").onclick = async () => {
     $("learn-btn").disabled = false;
     return;
   }
-  learnPoll = setInterval(pollLearn, 500);
+  const run = learnPoll = {};
+  setTimeout(() => pollLearn(run), 500);
 };
 
-async function pollLearn() {
+// One poll in flight at a time (next one scheduled only after this reply), tied to
+// its run. A fixed setInterval let several slow replies overlap; each saw `done`
+// and re-fired the render/toast/scroll-to-rule, dragging the view back down.
+async function pollLearn(run) {
+  if (run !== learnPoll) return;
   let p;
   try {
     p = await fetch("/api/learn/progress").then((r) => r.json());
-  } catch (e) { return; }
+  } catch (e) {
+    if (run === learnPoll) setTimeout(() => pollLearn(run), 500);
+    return;
+  }
+  if (run !== learnPoll) return;
 
   if (p.tail && p.tail.length) $("learn-tail").textContent = p.tail.join("\n");
   $("learn-full").textContent = p.log || "";
   autoScroll($("learn-full"));
 
-  if (p.done) {
-    clearInterval(learnPoll); learnPoll = null;
+  if (!p.done) {
+    setTimeout(() => pollLearn(run), 500);
+  } else {
+    learnPoll = null;
     $("learn-btn").disabled = false;
     $("learn-status").textContent = "";
     if (p.error) {

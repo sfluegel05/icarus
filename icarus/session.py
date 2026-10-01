@@ -1,12 +1,14 @@
 """In-memory session state for the ICaRuS demo.
 
-A single global session is kept (demo, single user). A session holds a set of
-molecules, each labelled positive / negative / unlabelled, plus the most recent
+Each browser tab gets its own session (keyed by a client-generated id, see
+:class:`SessionStore`), so tabs and concurrent users never see each other's work. A
+session holds a set of molecules, each labelled positive / negative / unlabelled, plus the most recent
 learned + (optionally) hand-edited hypothesis and the last classification map so
 edits can be diffed.
 """
 
 import itertools
+import re
 import threading
 import time
 
@@ -106,6 +108,12 @@ class Session:
         self.concept_name: str | None = None
         self.concept_chebi_id: str | None = None
         self.concept_definition: str | None = None
+        # Live-learning state, updated by the background learner thread and polled
+        # by the UI; guarded by ``learn_lock`` (not ``lock``, so polling never waits
+        # on a slow session operation).
+        self.learn_lock = threading.Lock()
+        self.learn = new_learn_state()
+        self.last_used = time.time()
 
     # ── molecule management ────────────────────────────────────────────────
     def _new_id(self) -> str:
@@ -258,5 +266,57 @@ class Session:
         self.concept_definition = None
 
 
-# The single global demo session.
-SESSION = Session()
+def new_learn_state(method: str | None = None) -> dict:
+    return {"running": False, "done": False, "error": None, "lines": [],
+            "message": None, "score": None, "method": method}
+
+
+# Session ids are generated client-side (a random UUID per tab); anything else is
+# rejected so arbitrary strings can't be used to fill the store.
+_SID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+class SessionStore:
+    """All live sessions, keyed by the per-tab session id.
+
+    Sessions idle for longer than ``ttl`` seconds are dropped (unless a learn is still
+    running for them), and at most ``max_sessions`` are kept — the least recently
+    used idle session is evicted first."""
+
+    def __init__(self, ttl: float = 12 * 3600, max_sessions: int = 200):
+        self.ttl = ttl
+        self.max_sessions = max_sessions
+        self._lock = threading.Lock()
+        self._sessions: dict[str, Session] = {}
+
+    @staticmethod
+    def valid_id(sid) -> bool:
+        return isinstance(sid, str) and bool(_SID_RE.match(sid))
+
+    def get(self, sid: str) -> Session:
+        """The session for ``sid``, created on first use."""
+        now = time.time()
+        with self._lock:
+            s = self._sessions.get(sid)
+            if s is None:
+                self._evict(now)
+                s = self._sessions[sid] = Session()
+            s.last_used = now
+            return s
+
+    def _evict(self, now: float):
+        idle = [(s.last_used, sid) for sid, s in self._sessions.items()
+                if not s.learn["running"]]
+        for last_used, sid in idle:
+            if now - last_used > self.ttl:
+                del self._sessions[sid]
+        excess = len(self._sessions) - self.max_sessions + 1
+        if excess > 0:
+            for _, sid in sorted(i for i in idle if i[1] in self._sessions)[:excess]:
+                del self._sessions[sid]
+
+    def __len__(self):
+        return len(self._sessions)
+
+
+SESSIONS = SessionStore()

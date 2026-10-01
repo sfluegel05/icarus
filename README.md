@@ -79,7 +79,7 @@ to arbitrary molecules.
   and demo constants.
 - **`icarus/data_store.py`** — loads the ChEBI v251 molecule DataFrame and
   hierarchy graph once; class search and example gathering.
-- **`icarus/session.py`** — in-memory session (single user); SMILES/InChI parsing
+- **`icarus/session.py`** — in-memory sessions, one per browser tab; SMILES/InChI parsing
   via `chebi_utils.read_molecule`.
 - **`icarus/similarity.py`** — fingerprint pool (cached to `data/fingerprints.pkl`)
   and similarity suggestions.
@@ -136,8 +136,9 @@ three things: this repo, a Python environment, and two data files.
 **1. This repo.** Copy the whole `icarus/` project (the `icarus/` package,
 `web/`, `run.sh`, `requirements.txt`). It writes only into `ICARUS_DATA_DIR`
 (default `data/` in this repo), which it creates itself — the fingerprint cache
-(`fingerprints.pkl`) and the generated ILP files (`work/exs.pl`, `bk.pl`,
-`bias.pl`) are all produced at runtime, nothing to copy.
+(`fingerprints.pkl`) and the generated ILP files (one temporary `work/<run>/`
+directory per learning run, removed afterwards) are all produced at runtime,
+nothing to copy.
 
 **2. A Python environment** (3.11+), set up as in [Running](#running).
 `run.sh` uses `.wslvenv/bin/python` by default; point it at another interpreter
@@ -175,7 +176,10 @@ Aleph backend needs `swipl` on `PATH`.
 
 ## Notes / limitations (it's a demo)
 
-- Single global in-memory session; no persistence, auth, or concurrency.
+- One in-memory session per browser tab (keyed by a random id in `sessionStorage`,
+  so a reload keeps it; a duplicated tab starts fresh). Sessions are not persisted,
+  are dropped after 12 h idle (at most 200 kept), and there is no auth. LLM learns
+  are serialised, since they share the on-disk rule library.
 - Learning runs in a background thread (the UI polls for live output); the `timeout`
   bounds the Popper and Aleph searches, while the LLM call is bounded by the CLI.
 - The Popper/Aleph bias is kept small (low-arity atom predicates, `max_vars`/`max_body`

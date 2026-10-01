@@ -79,29 +79,30 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
                 "error": "Need at least one positive and one negative example."}
 
     timeout = timeout or config.DEFAULT_TIMEOUT
-    stem, bias_path = _write_problem(config.WORK_DIR, pos_mols, neg_mols,
-                                     concept=concept, on_line=on_line)
+    with ilp.run_dir("aleph_") as work_dir:
+        stem, bias_path = _write_problem(work_dir, pos_mols, neg_mols,
+                                         concept=concept, on_line=on_line)
 
-    on_line(f"Running Aleph via SWI-Prolog (up to {timeout}s)…")
-    # icarus's Popper path is non-noisy — it must find a perfectly-separating rule — so run
-    # Aleph the same way (chebILP's defaults allow up to noise=200 negatives, meant for the
-    # noisy class-scale problems). minpos=1 lets it learn from a single-positive session.
-    result = run_ilp_training_aleph(
-        _HEAD_ID, stem, bias_path, timeout,
-        max_body=config.DEFAULT_ALEPH_MAX_BODY, log_dir=config.WORK_DIR,
-        settings_overrides={"noise": 0, "minpos": 1},
-    )
+        on_line(f"Running Aleph via SWI-Prolog (up to {timeout}s)…")
+        # icarus's Popper path is non-noisy — it must find a perfectly-separating rule — so run
+        # Aleph the same way (chebILP's defaults allow up to noise=200 negatives, meant for the
+        # noisy class-scale problems). minpos=1 lets it learn from a single-positive session.
+        result = run_ilp_training_aleph(
+            _HEAD_ID, stem, bias_path, timeout,
+            max_body=config.DEFAULT_ALEPH_MAX_BODY, log_dir=work_dir,
+            settings_overrides={"noise": 0, "minpos": 1},
+        )
 
-    # Replay the engine trace (written by run_ilp_training_aleph) into the log.
-    out_path = os.path.join(config.WORK_DIR, "aleph", f"{_HEAD_ID}.out")
-    try:
-        with open(out_path) as f:
-            for raw in f:
-                line = raw.rstrip("\n")
-                if line.strip():
-                    on_line(line)
-    except OSError:
-        pass
+        # Replay the engine trace (written by run_ilp_training_aleph) into the log.
+        out_path = os.path.join(work_dir, "aleph", f"{_HEAD_ID}.out")
+        try:
+            with open(out_path) as f:
+                for raw in f:
+                    line = raw.rstrip("\n")
+                    if line.strip():
+                        on_line(line)
+        except OSError:
+            pass
 
     rule = _rewrite_head(result.get("prog_str"))
     score = result.get("score")

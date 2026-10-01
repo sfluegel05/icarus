@@ -6,12 +6,15 @@ its clingo-based rule evaluation, so the demo stays consistent with the main
 pipeline.
 """
 
+import contextlib
 import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import pandas as pd
 
@@ -166,6 +169,18 @@ def _bias_lines(body_predicates) -> list[str]:
     return lines
 
 
+@contextlib.contextmanager
+def run_dir(prefix: str):
+    """A fresh working directory under ``config.WORK_DIR`` for one learning run,
+    removed afterwards — concurrent runs (other tabs / users) must not overwrite
+    each other's problem files."""
+    path = tempfile.mkdtemp(prefix=prefix, dir=config.WORK_DIR)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def write_problem(work_dir, pos_mols, neg_mols, concept=None, on_line=None):
     """Write exs.pl, bk.pl and bias.pl for the labelled molecules. Returns paths.
 
@@ -203,10 +218,10 @@ def learn(pos_mols, neg_mols, timeout=None) -> dict:
         return {"rule": None, "score": None, "error": "Need at least one positive and one negative example."}
 
     timeout = timeout or config.DEFAULT_TIMEOUT
-    exs_path, bk_path, bias_path = write_problem(config.WORK_DIR, pos_mols, neg_mols)
-
-    settings = {"timeout": timeout, "noisy": True}  # MDL cost fn: best rule, need not separate perfectly
-    result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings)
+    with run_dir("popper_") as work_dir:
+        exs_path, bk_path, bias_path = write_problem(work_dir, pos_mols, neg_mols)
+        settings = {"timeout": timeout, "noisy": True}  # MDL cost fn: best rule, need not separate perfectly
+        result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings)
     rule = result.get("prog_str")
     score = result.get("score")
     score_dict = None
@@ -244,35 +259,36 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
                 "error": "Need at least one positive and one negative example."}
 
     timeout = timeout or config.DEFAULT_TIMEOUT
-    exs_path, bk_path, bias_path = write_problem(config.WORK_DIR, pos_mols, neg_mols,
-                                                 concept=concept, on_line=on_line)
-    # Noisy: Popper minimises an MDL cost, returning the best rule found even when none
-    # perfectly separates the examples (rather than failing to return one).
-    settings = {"timeout": timeout, "noisy": True}
-    script = _training_script(exs_path, bk_path, bias_path, settings)
+    with run_dir("popper_") as work_dir:
+        exs_path, bk_path, bias_path = write_problem(work_dir, pos_mols, neg_mols,
+                                                     concept=concept, on_line=on_line)
+        # Noisy: Popper minimises an MDL cost, returning the best rule found even when none
+        # perfectly separates the examples (rather than failing to return one).
+        settings = {"timeout": timeout, "noisy": True}
+        script = _training_script(exs_path, bk_path, bias_path, settings)
 
-    proc = subprocess.Popen(
-        [sys.executable, "-u", "-c", script],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-        start_new_session=True, cwd=config.WORK_DIR,
-    )
-    result = {"rule": None, "score": None}
-    for raw in proc.stdout:
-        line = raw.rstrip("\n")
-        if line.startswith(_RESULT_MARKER):
-            try:
-                data = json.loads(line[len(_RESULT_MARKER):])
-                result["rule"] = data.get("prog_str")
-                sc = data.get("score")
-                if sc:
-                    tp, fn, tn, fp = sc
-                    result["score"] = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
-            except Exception:
-                pass
-            continue
-        if line.strip():
-            on_line(line)
-    proc.wait()
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            start_new_session=True, cwd=work_dir,
+        )
+        result = {"rule": None, "score": None}
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if line.startswith(_RESULT_MARKER):
+                try:
+                    data = json.loads(line[len(_RESULT_MARKER):])
+                    result["rule"] = data.get("prog_str")
+                    sc = data.get("score")
+                    if sc:
+                        tp, fn, tn, fp = sc
+                        result["score"] = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
+                except Exception:
+                    pass
+                continue
+            if line.strip():
+                on_line(line)
+        proc.wait()
     return result
 
 

@@ -26,6 +26,7 @@ import contextlib
 import io
 import os
 import re
+import threading
 
 import pandas as pd
 from rdkit import Chem
@@ -50,6 +51,10 @@ TARGET = config.TARGET_LABEL
 # session seeded from a class uses that class's real id; an ad-hoc SMILES-only
 # session has none, so it learns under this dummy id.
 _GENERIC_ID = "0"
+
+# The rule library is one set of JSON files shared by every session; the pipeline
+# reads and rewrites them, so concurrent runs (other tabs / users) are serialised.
+_LIBRARY_LOCK = threading.Lock()
 
 
 def _rows(mols) -> pd.DataFrame:
@@ -182,6 +187,16 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None) -
         return {"rule": None, "score": None,
                 "error": "Need at least one positive and one negative example."}
 
+    if not _LIBRARY_LOCK.acquire(blocking=False):
+        on_line("Waiting for another LLM run to finish (the rule library is shared)…")
+        _LIBRARY_LOCK.acquire()
+    try:
+        return _learn_locked(pos_mols, neg_mols, on_line, model, concept)
+    finally:
+        _LIBRARY_LOCK.release()
+
+
+def _learn_locked(pos_mols, neg_mols, on_line, model, concept) -> dict:
     chebi_id, info = _build_info(concept or {})
     library_dir = config.LLM_LIBRARY_DIR
 

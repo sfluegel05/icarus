@@ -5,10 +5,40 @@ let selectedClass = null;
 let lastState = null;
 let molById = {};
 
+// Each tab has its own server-side session, keyed by a random id kept in
+// sessionStorage (so it survives a reload but is not shared with other tabs).
+// crypto.getRandomValues, unlike randomUUID, also works over plain http.
+const SID_KEY = "icarus-session-id";
+const newSid = () =>
+  Array.from(crypto.getRandomValues(new Uint8Array(16)),
+             (b) => b.toString(16).padStart(2, "0")).join("");
+let SID = sessionStorage.getItem(SID_KEY) || newSid();
+sessionStorage.setItem(SID_KEY, SID);
+
+// A duplicated tab inherits sessionStorage, and with it the id. Ask the other open
+// tabs whether one already uses this id; if so, start a fresh session instead.
+const sidReady = new Promise((resolve) => {
+  if (!("BroadcastChannel" in window)) return resolve();
+  const ch = new BroadcastChannel("icarus-sessions");
+  let probing = true;
+  ch.onmessage = (e) => {
+    const { type, sid } = e.data || {};
+    if (sid !== SID) return;
+    if (type === "probe" && !probing) ch.postMessage({ type: "taken", sid });
+    else if (type === "taken" && probing) {
+      SID = newSid();
+      sessionStorage.setItem(SID_KEY, SID);
+    }
+  };
+  ch.postMessage({ type: "probe", sid: SID });
+  setTimeout(() => { probing = false; resolve(); }, 150);
+});
+
 async function api(path, body) {
-  const opts = { method: body === undefined ? "GET" : "POST" };
+  await sidReady;
+  const opts = { method: body === undefined ? "GET" : "POST", headers: { "X-Session-Id": SID } };
   if (body !== undefined) {
-    opts.headers = { "Content-Type": "application/json" };
+    opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
@@ -61,7 +91,7 @@ function hashStr(s) {
   return (h >>> 0).toString(36);
 }
 const depictUrl = (m, w, h) =>
-  `/api/depict?id=${encodeURIComponent(m.id)}&w=${w}&h=${h}&v=${hashStr(m.smiles || m.id)}`;
+  `/api/depict?id=${encodeURIComponent(m.id)}&sid=${SID}&w=${w}&h=${h}&v=${hashStr(m.smiles || m.id)}`;
 
 // ── rendering ────────────────────────────────────────────────────────────
 function render(state) {
@@ -748,7 +778,8 @@ async function pollLearn(run) {
   if (run !== learnPoll) return;
   let p;
   try {
-    p = await fetch("/api/learn/progress").then((r) => r.json());
+    p = await fetch("/api/learn/progress", { headers: { "X-Session-Id": SID } })
+      .then((r) => r.json());
   } catch (e) {
     if (run === learnPoll) setTimeout(() => pollLearn(run), 500);
     return;

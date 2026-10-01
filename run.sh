@@ -15,10 +15,16 @@
 set -euo pipefail
 
 ICARUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-#PY="${ICARUS_PYTHON:-$ICARUS_DIR/.wslvenv/bin/python}"
+PY="${ICARUS_PYTHON:-$ICARUS_DIR/.wslvenv/bin/python}"
+if [ ! -x "$PY" ]; then
+  # No project venv yet: fall back to whatever python is on PATH (e.g. an activated venv).
+  PY="$(command -v python3 || command -v python || true)"
+  [ -n "$PY" ] || { echo "run.sh: no python found; create .wslvenv or set ICARUS_PYTHON" >&2; exit 1; }
+fi
+echo "run.sh: using $PY" >&2
 PORT="${ICARUS_PORT:-8000}"
 
 export PYTHONPATH="$ICARUS_DIR:${PYTHONPATH:-}"
 cd "$ICARUS_DIR"
 
-exec python -m uvicorn icarus.app:app --host 0.0.0.0 --port "$PORT" "$@"
+exec "$PY" -m uvicorn icarus.app:app --host 0.0.0.0 --port "$PORT" "$@"

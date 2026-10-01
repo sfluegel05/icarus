@@ -1,29 +1,23 @@
 """Central configuration and paths for the ICaRuS demo.
 
-Paths default to the sibling ``chebILP`` checkout, which already carries the
-pre-built ChEBI v251 molecule DataFrame and hierarchy graph. The app is meant to
-run under the ``chebILP/.wslvenv`` interpreter (Linux), so the defaults are
-POSIX ``/mnt/c/...`` paths; override with environment variables if your layout
-differs.
+All data lives in this project's ``data/`` directory (override with
+``ICARUS_DATA_DIR``), including the pre-built ChEBI v251 molecule DataFrame and
+hierarchy graph. The app is meant to run under this project's own ``.wslvenv``
+interpreter (Linux), with ``chebILP`` and ``chebi_utils`` installed from pip.
 """
 
 import os
 
-# Root of the chebILP directory (provides data files and the
-# chebILP / chebi_utils packages on the import path).
-CHEBILP_DIR = os.environ.get(
-    "ICARUS_CHEBILP_DIR",
-    ".",
-)
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# chebILP keeps its API config (OPENAI_API_BASE/OPENAI_API_KEY, ANTHROPIC_API_KEY)
-# in CHEBILP_DIR/.env and reads it via load_dotenv(), which searches from the
-# process cwd upward. We run from the icarus dir, so that search never reaches
-# chebILP's sibling .env — load it explicitly here (without overriding anything
-# already set in the real environment) so the openai/ LLM backend finds its base
-# URL and key.
-def _load_chebilp_env() -> None:
-    env_path = os.path.join(CHEBILP_DIR, ".env")
+
+# chebILP reads its API config (OPENAI_API_BASE/OPENAI_API_KEY, ANTHROPIC_API_KEY)
+# via load_dotenv(), which searches from the process cwd upward. Load this
+# project's .env explicitly (without overriding anything already set in the real
+# environment) so the openai/ LLM backend finds its base URL and key regardless
+# of the cwd.
+def _load_env() -> None:
+    env_path = os.path.join(_PROJECT_DIR, ".env")
     try:
         from dotenv import load_dotenv
 
@@ -46,27 +40,25 @@ def _load_chebilp_env() -> None:
                 os.environ[key] = value.strip().strip("'\"")
 
 
-_load_chebilp_env()
+_load_env()
+
+# Data directory for this app: ChEBI data files (read-only), fingerprint cache,
+# generated ILP problems and the rule library.
+ICARUS_DATA = os.environ.get("ICARUS_DATA_DIR", os.path.join(_PROJECT_DIR, "data"))
+os.makedirs(ICARUS_DATA, exist_ok=True)
 
 CHEBI_VERSION = int(os.environ.get("ICARUS_CHEBI_VERSION", "251"))
 
-_DATA = os.path.join(CHEBILP_DIR, "data", f"chebi_v{CHEBI_VERSION}")
-MOLECULES_PKL = os.path.join(_DATA, "ChEBI25_3_STAR", "molecules.pkl")
-GRAPH_PKL = os.path.join(_DATA, "chebi_graph.pkl")
-
-# Working directory for this app (fingerprint cache, generated ILP problems).
-ICARUS_DATA = os.environ.get(
-    "ICARUS_DATA_DIR",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
-)
-os.makedirs(ICARUS_DATA, exist_ok=True)
+_CHEBI_DATA = os.path.join(ICARUS_DATA, f"chebi_v{CHEBI_VERSION}")
+MOLECULES_PKL = os.path.join(_CHEBI_DATA, "ChEBI25_3_STAR", "molecules.pkl")
+GRAPH_PKL = os.path.join(_CHEBI_DATA, "chebi_graph.pkl")
 
 FP_CACHE = os.path.join(ICARUS_DATA, "fingerprints.pkl")
 WORK_DIR = os.path.join(ICARUS_DATA, "work")
 os.makedirs(WORK_DIR, exist_ok=True)
 
 # Web assets.
-WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
+WEB_DIR = os.path.join(_PROJECT_DIR, "web")
 
 # Size of the random ChEBI molecule pool used for similarity suggestions.
 SIMILARITY_POOL_SIZE = int(os.environ.get("ICARUS_POOL_SIZE", "12000"))
@@ -126,8 +118,8 @@ LLM_COMPUTED_FACTS = False
 # External data files this app reads (everything else it generates itself). Kept
 # here so a deployment on another machine has a single place to point at.
 REQUIRED_FILES = {
-    "molecules DataFrame (ICARUS_CHEBILP_DIR/data/...)": MOLECULES_PKL,
-    "ChEBI hierarchy graph (ICARUS_CHEBILP_DIR/data/...)": GRAPH_PKL,
+    "molecules DataFrame": MOLECULES_PKL,
+    "ChEBI hierarchy graph": GRAPH_PKL,
 }
 
 

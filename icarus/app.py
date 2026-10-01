@@ -523,8 +523,8 @@ async def _lifespan(app):
         print(
             "\n[ICaRuS] WARNING — required data file(s) not found:\n"
             + "\n".join(missing)
-            + "\n  Set ICARUS_CHEBILP_DIR to the chebILP checkout that holds them "
-            "(see README → Running on another system).\n",
+            + "\n  Place them under this project's data/ directory, or set "
+            "ICARUS_DATA_DIR (see README → Running on another system).\n",
             flush=True,
         )
     else:

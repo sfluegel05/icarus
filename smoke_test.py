@@ -1,6 +1,6 @@
 """Quick end-to-end check of the ICaRuS ILP pipeline (no web server).
 
-Run under the chebILP WSL venv:
+Run from this repo under its WSL venv:
     PYTHONPATH=. .wslvenv/bin/python smoke_test.py
 """
 

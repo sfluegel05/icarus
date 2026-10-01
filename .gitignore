@@ -9,6 +9,9 @@ __pycache__/
 venv/
 .wslvenv/
 
+# Secrets (LLM API config)
+.env
+
 # Editors / OS
 .idea/
 .vscode/

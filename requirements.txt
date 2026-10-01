@@ -3,10 +3,8 @@
 # rdkit close, since molecules.pkl contains pickled RDKit Mol objects.
 #
 # This list does NOT cover:
-#   - the three LOCAL packages, installed from their sibling checkouts:
-#       pip install -e ../python-chebi-utils      # chebi_utils
-#       pip install -e ../chebILP                  # chebILP
-#       pip install -e ../popper-sfluegel          # popper  (ILP engine)
+#   - popper (ILP engine), installed separately from its checkout:
+#       pip install -e ../popper-sfluegel
 #   - the two ChEBI data files (see README → Running on another system).
 
 starlette==1.1.0
@@ -18,4 +16,4 @@ clingo==5.8.0
 xclingo==2.0b14
 pillow==12.1.1
 chebi_utils==0.4
-chebILP==1.2
+chebILP[explain,llm]==1.2

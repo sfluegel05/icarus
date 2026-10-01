@@ -9,7 +9,8 @@ fingerprint similarity. The learned rule is shown, its misclassifications are
 flagged, and the expert can hand-edit the rule (seeing which classifications
 change) and iterate.
 
-This extends the per-class ChEBI approach in `../chebILP` to arbitrary molecules.
+This extends the per-class ChEBI approach of [chebILP](https://pypi.org/project/chebILP/)
+to arbitrary molecules.
 
 ## What it does (the flow)
 
@@ -74,7 +75,7 @@ This extends the per-class ChEBI approach in `../chebILP` to arbitrary molecules
 
 ## Architecture
 
-- **`icarus/config.py`** — paths (defaults point at the sibling `chebILP` data)
+- **`icarus/config.py`** — paths (defaults point at this project's `data/`)
   and demo constants.
 - **`icarus/data_store.py`** — loads the ChEBI v251 molecule DataFrame and
   hierarchy graph once; class search and example gathering.
@@ -101,8 +102,16 @@ The learned rule defines a generic target predicate `concept/1`, e.g.
 
 ## Running
 
-The app reuses the `chebILP/.wslvenv` interpreter, which already has Popper,
-clingo, RDKit, `chebi_utils` and `chebILP` installed. From this repo:
+The app runs under this project's own WSL virtualenv (`.wslvenv`). Create it once
+(inside WSL, from this repo):
+
+```bash
+python3 -m venv .wslvenv
+.wslvenv/bin/pip install -r requirements.txt   # incl. chebILP + chebi_utils from PyPI
+.wslvenv/bin/pip install -e ../popper-sfluegel  # popper (ILP engine; see its README for system prereqs)
+```
+
+Then, from this repo:
 
 ```bash
 wsl -e bash run.sh
@@ -114,7 +123,7 @@ Then open <http://localhost:8000>. First launch builds the fingerprint pool
 Quick offline check of the ILP pipeline (no server):
 
 ```bash
-PYTHONPATH=. .wslvenv/bin/python smoke_test.py   # run from chebILP, or adjust PYTHONPATH
+PYTHONPATH=. .wslvenv/bin/python smoke_test.py
 ```
 
 ## Running on another system
@@ -126,51 +135,43 @@ three things: this repo, a Python environment, and two data files.
 
 **1. This repo.** Copy the whole `icarus/` project (the `icarus/` package,
 `web/`, `run.sh`, `requirements.txt`). It writes only into `ICARUS_DATA_DIR`
-(default `icarus/data/`), which it creates itself — the fingerprint cache
+(default `data/` in this repo), which it creates itself — the fingerprint cache
 (`fingerprints.pkl`) and the generated ILP files (`work/exs.pl`, `bk.pl`,
 `bias.pl`) are all produced at runtime, nothing to copy.
 
-**2. A Python environment** (3.11+). Install `requirements.txt`, plus the three
-local packages from their sibling checkouts and Popper's own prerequisites:
+**2. A Python environment** (3.11+), set up as in [Running](#running).
+`run.sh` uses `.wslvenv/bin/python` by default; point it at another interpreter
+with `ICARUS_PYTHON`.
 
-```bash
-pip install -r requirements.txt
-pip install -e ../python-chebi-utils     # chebi_utils
-pip install -e ../chebILP                # chebILP
-pip install -e ../popper-sfluegel        # popper (ILP engine; see its README for system prereqs)
-```
+**3. Two ChEBI data files**, read-only, placed under `ICARUS_DATA_DIR`
+(default: this repo's `data/`):
 
-Point `run.sh` at this interpreter with `ICARUS_PYTHON` (or keep the default
-`$ICARUS_CHEBILP_DIR/.wslvenv/bin/python`).
+| File | Location (relative to `ICARUS_DATA_DIR`) |
+|------|------------------------------------------|
+| Molecule DataFrame (52k mols: SMILES, InChI, name, RDKit mol) | `chebi_v251/ChEBI25_3_STAR/molecules.pkl` |
+| ChEBI hierarchy graph (networkx DiGraph) | `chebi_v251/chebi_graph.pkl` |
 
-**3. Two ChEBI data files**, read-only, placed under the directory
-`ICARUS_CHEBILP_DIR` points at (default: the sibling `chebILP` checkout):
-
-| File | Location (relative to `ICARUS_CHEBILP_DIR`) |
-|------|---------------------------------------------|
-| Molecule DataFrame (52k mols: SMILES, InChI, name, RDKit mol) | `data/chebi_v251/ChEBI25_3_STAR/molecules.pkl` |
-| ChEBI hierarchy graph (networkx DiGraph) | `data/chebi_v251/chebi_graph.pkl` |
-
-Copy them from an existing chebILP checkout, or regenerate from a chebILP install
-with `python -m chebILP prepare_dataset --chebi_version 251`. On startup the
-server prints whether both files were located and names any that are missing.
+Regenerate them with `python -m chebILP prepare_dataset --chebi_version 251` and
+copy the resulting `data/chebi_v251/` folder here. On startup the server prints
+whether both files were located and names any that are missing.
 
 **Configuration knobs** (all optional; see `run.sh` header):
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `ICARUS_CHEBILP_DIR` | `/mnt/c/.../chebILP` | Holds the `data/chebi_v<version>/…` files above |
-| `ICARUS_PYTHON` | `$ICARUS_CHEBILP_DIR/.wslvenv/bin/python` | Interpreter `run.sh` launches |
+| `ICARUS_PYTHON` | `./.wslvenv/bin/python` | Interpreter `run.sh` launches |
 | `ICARUS_CHEBI_VERSION` | `251` | ChEBI release the data is for |
-| `ICARUS_DATA_DIR` | `icarus/data` | Writable dir: fingerprint cache + ILP work files |
+| `ICARUS_DATA_DIR` | `data/` | ChEBI data files, fingerprint cache, ILP work files, rule library |
 | `ICARUS_POOL_SIZE` | `12000` | Molecules fingerprinted for suggestions |
 | `ICARUS_PORT` | `8000` | HTTP port |
 | `ICARUS_LLM_MODEL` | `claude-haiku-4-5` | Model id for the LLM backend (local `claude` CLI) |
 
+API config for the LLM backend (`OPENAI_API_BASE` / `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`) is read from a `.env` file in this repo's root, if present.
+
 The LLM backend calls the locally logged-in `claude` CLI (via the Claude Agent SDK)
 and bills to that subscription; it needs the CLI installed and `/login`-ed, and the
-Aleph backend needs `swipl` on `PATH` (both already present in the `chebILP/.wslvenv`
-setup).
+Aleph backend needs `swipl` on `PATH`.
 
 ## Notes / limitations (it's a demo)
 

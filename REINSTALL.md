@@ -1,49 +1,22 @@
 # Reinstalling ICaRuS on a new machine
 
-A checklist of everything that must be set up or checked when moving ICaRuS to a
-fresh machine. ICaRuS is a thin app on top of the sibling `chebILP` project — most
-of the caveats are about wiring up those external dependencies, data files, and
-API config, none of which live in this repo.
-
-See also the README's *Running on another system* section for the narrative
-version; this file is the caveat-oriented checklist.
-
-## 0. Commit/push pending changes first
-
-A fresh `git clone` only gets what's committed. Before migrating, make sure the
-working tree is clean (`git status`) and everything is **pushed** — uncommitted
-changes (especially in `icarus/config.py`) do not travel with a clone.
-
-## 1. Sibling local packages (not vendored, not in this repo)
-
-Check these out next to the location `ICARUS_CHEBILP_DIR` points at and install
-each editable:
-
-```bash
-pip install -e ../python-chebi-utils     # chebi_utils
-pip install -e ../chebILP                # chebILP
-pip install -e ../popper-sfluegel        # popper (ILP engine; has its own system prereqs)
-```
-
-## 2. Python environment (Linux / WSL)
-
-- The app runs under a **Linux** interpreter (default `chebILP/.wslvenv/bin/python`)
-  via `wsl -e bash run.sh`. There is no separate icarus venv.
-- `pip install -r requirements.txt` plus the three editable installs above.
+## Requirements
+Use Python version 3.14.
+- `pip install -r requirements.txt` (chebi-utils and chebILP have only been tested with local editable version, but should line up)
 - Keep **rdkit** close to the pinned version — `molecules.pkl` holds pickled
   RDKit `Mol` objects and a mismatched rdkit can fail to unpickle them.
+- [SWI-Prolog](https://www.swi-prolog.org/Download.html) and NuWLS (cf. https://github.com/logic-and-learning-lab/Popper) need to be on the PATH
 
-## 3. Two ChEBI data files (not in git)
+## data files (not in git)
 
-`data/` is gitignored, and these files live in the chebILP checkout anyway. Place
-under `ICARUS_CHEBILP_DIR/data/chebi_v251/`:
+`data/` is gitignored. Place the files in `ICARUS_CHEBILP_DIR/data/`:
 
 | File | Path (relative to `ICARUS_CHEBILP_DIR`) |
 |------|------------------------------------------|
 | Molecule DataFrame (~52k mols) | `data/chebi_v251/ChEBI25_3_STAR/molecules.pkl` |
 | ChEBI hierarchy graph (networkx DiGraph) | `data/chebi_v251/chebi_graph.pkl` |
 
-Copy them from an existing chebILP checkout, or regenerate:
+Download them, or regenerate:
 
 ```bash
 python -m chebILP prepare_dataset --chebi_version 251
@@ -52,7 +25,9 @@ python -m chebILP prepare_dataset --chebi_version 251
 On startup the server prints which required files were located and names any
 missing ones (`config.check_data_files`).
 
-## 4. LLM / API config (biggest caveat)
+Also, there is a rule library folder (optional). Unzip and place it in `data/rule_library`
+
+## LLM / API config - don't do this for now
 
 Which credentials you need depends on `ICARUS_LLM_MODEL`:
 
@@ -68,13 +43,6 @@ Which credentials you need depends on `ICARUS_LLM_MODEL`:
 
 The **Popper** and **Aleph** backends need no API key.
 
-## 5. External tools on PATH
-
-- `swipl` (SWI-Prolog) — required by the **Aleph** backend.
-- `xclingo` + `pillow`/PIL — for the explanation feature (in `requirements.txt`).
-- `claude` CLI — only for the bare-model LLM path (see above).
-- Popper (`../popper-sfluegel`) may have additional system prerequisites — see its
-  README.
 
 ## 6. Hardcoded paths → override with env vars
 
@@ -83,7 +51,7 @@ and `run.sh`). On a new machine/user set at minimum:
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `ICARUS_CHEBILP_DIR` | `/mnt/c/.../chebILP` | Holds the data files + sibling packages |
+| `ICARUS_CHEBILP_DIR` | `.` | Holds the data files + sibling packages |
 | `ICARUS_PYTHON` | `$ICARUS_CHEBILP_DIR/.wslvenv/bin/python` | Interpreter `run.sh` launches |
 | `ICARUS_CHEBI_VERSION` | `251` | ChEBI release the data is for |
 | `ICARUS_DATA_DIR` | `icarus/data` | Writable dir: fingerprint cache + ILP work files |

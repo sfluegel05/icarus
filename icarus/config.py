@@ -9,11 +9,11 @@ differs.
 
 import os
 
-# Root of the chebILP checkout (provides molecules.pkl, chebi_graph.pkl and the
+# Root of the chebILP directory (provides data files and the
 # chebILP / chebi_utils packages on the import path).
 CHEBILP_DIR = os.environ.get(
     "ICARUS_CHEBILP_DIR",
-    "/mnt/c/Users/sifluegel/PycharmProjects/chebILP",
+    ".",
 )
 
 # chebILP keeps its API config (OPENAI_API_BASE/OPENAI_API_KEY, ANTHROPIC_API_KEY)
@@ -101,7 +101,7 @@ DEFAULT_ALEPH_MAX_BODY = 6
 # `openai/agent_d7-gH6BBrzS_2ndkcKjLB`, the qwen3.5 model) goes to the
 # OpenAI-compatible endpoint set by OPENAI_API_BASE/OPENAI_API_KEY; a bare id
 # (e.g. `claude-haiku-4-5`) runs through the locally logged-in `claude` CLI.
-LLM_MODEL = os.environ.get("ICARUS_LLM_MODEL", "openai/agent_d7-gH6BBrzS_2ndkcKjLB")
+LLM_MODEL = os.environ.get("ICARUS_LLM_MODEL", "")
 # Number of auxiliary predicates to request from the model per rule.
 LLM_N_PREDICATES = int(os.environ.get("ICARUS_LLM_N_PREDICATES", "4"))
 # Reuse candidates retrieved from the session-local rule library per learn.

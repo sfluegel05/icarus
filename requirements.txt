@@ -17,9 +17,5 @@ networkx==3.6.1
 clingo==5.8.0
 xclingo==2.0b14
 pillow==12.1.1
-
-# Pulled in by chebi_utils (listed so a plain venv resolves them):
-numpy==2.4.3
-scikit-learn==1.8.0
-chembl_structure_pipeline==1.2.4
-fastobo==0.14.1
+chebi_utils==0.4
+chebILP==1.2

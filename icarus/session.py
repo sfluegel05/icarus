@@ -67,15 +67,16 @@ class RuleEntry:
     against, so a later change to the examples can be flagged as making it stale.
     """
 
-    __slots__ = ("id", "origin", "rule", "confusion", "signature", "created_at")
+    __slots__ = ("id", "origin", "rule", "confusion", "signature", "created_at", "model")
 
-    def __init__(self, rid, origin, rule, confusion, signature, created_at):
+    def __init__(self, rid, origin, rule, confusion, signature, created_at, model=None):
         self.id = rid
         self.origin = origin
         self.rule = rule
         self.confusion = confusion            # {"TP","FP","TN","FN"} or None
         self.signature = signature            # labelled-set snapshot when scored
         self.created_at = created_at
+        self.model = model                    # LLM rules: which model wrote it
 
     def to_dict(self, current_signature):
         return {
@@ -84,6 +85,7 @@ class RuleEntry:
             "rule": self.rule,
             "confusion": self.confusion,
             "created_at": self.created_at,
+            "model": self.model,
             # Outdated if the labelled examples changed since this was scored.
             "stale": self.confusion is not None and self.signature != current_signature,
         }
@@ -114,6 +116,12 @@ class Session:
         self.learn_lock = threading.Lock()
         self.learn = new_learn_state()
         self.last_used = time.time()
+        # LLM prompts this session has sent (llm_guard's per-session quota). Not reset
+        # by clear(), so clearing the session doesn't refill the quota.
+        self.llm_prompts = 0
+        # Set once any request of this session carried a valid invite code (lifts the
+        # LLM limits). Sticky, so requests without the header can't unset it mid-run.
+        self.invited = False
 
     # ── molecule management ────────────────────────────────────────────────
     def _new_id(self) -> str:
@@ -225,10 +233,11 @@ class Session:
                 return e
         return None
 
-    def add_rule(self, origin: str, rule: str, confusion: dict | None = None) -> "RuleEntry":
+    def add_rule(self, origin: str, rule: str, confusion: dict | None = None,
+                 model: str | None = None) -> "RuleEntry":
         """Append a new rule to the history and make it the selected one."""
         entry = RuleEntry(f"r{next(self._rule_counter)}", origin, rule, confusion,
-                          self.labeled_signature(), time.time())
+                          self.labeled_signature(), time.time(), model=model)
         self.rule_history.append(entry)
         self.selected_rule_id = entry.id
         return entry
@@ -268,7 +277,7 @@ class Session:
 
 def new_learn_state(method: str | None = None) -> dict:
     return {"running": False, "done": False, "error": None, "lines": [],
-            "message": None, "score": None, "method": method}
+            "message": None, "score": None, "method": method, "cached": False}
 
 
 # Session ids are generated client-side (a random UUID per tab); anything else is

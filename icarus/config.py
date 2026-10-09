@@ -76,7 +76,10 @@ DEFAULT_MAX_NEG = 8
 DEFAULT_MAX_VARS = 4
 DEFAULT_MAX_BODY = 5
 DEFAULT_MAX_CLAUSES = 2
-DEFAULT_TIMEOUT = 20
+DEFAULT_TIMEOUT = 60
+# Wall-clock budget (seconds) for one LLM learn: all model calls of the pipeline
+# together. Enforced server-side (not client-settable) in icarus/llm_guard.py.
+LLM_TIMEOUT = int(os.environ.get("ICARUS_LLM_TIMEOUT", "300"))
 
 # Rule-generation methods the /api/learn endpoint accepts. All three reuse
 # chebILP infrastructure and produce a rule whose head is TARGET_LABEL, so the
@@ -94,6 +97,10 @@ DEFAULT_ALEPH_MAX_BODY = 6
 # OpenAI-compatible endpoint set by OPENAI_API_BASE/OPENAI_API_KEY; a bare id
 # (e.g. `claude-haiku-4-5`) runs through the locally logged-in `claude` CLI.
 LLM_MODEL = os.environ.get("ICARUS_LLM_MODEL", "")
+# Human-readable model name shown in the UI (for transparency about which model
+# writes the rules) — useful when LLM_MODEL is an opaque endpoint id. Defaults to
+# the model id itself.
+LLM_MODEL_NAME = os.environ.get("ICARUS_LLM_MODEL_NAME", "") or LLM_MODEL
 # Number of auxiliary predicates to request from the model per rule.
 LLM_N_PREDICATES = int(os.environ.get("ICARUS_LLM_N_PREDICATES", "4"))
 # Reuse candidates retrieved from the session-local rule library per learn.
@@ -113,6 +120,35 @@ ILP_LIBRARY_TOP_N = int(os.environ.get("ICARUS_ILP_LIBRARY_TOP_N", "8"))
 # bk the classify step builds); otherwise a rule using those facts would silently
 # never fire at inference time.
 LLM_COMPUTED_FACTS = False
+
+# How the `claude` CLI authenticates (bare model ids only). "subscription" uses the
+# CLI's own login; "api_key" bills ANTHROPIC_API_KEY from the environment / .env
+# (chebILP strips that key by default so it can't shadow the subscription).
+LLM_AUTH = os.environ.get("ICARUS_LLM_AUTH", "subscription").lower()
+
+# Abuse limits for a public deployment (see icarus/llm_guard.py). A "prompt" is one
+# LLM learn that actually reaches the model (cached library hits are free).
+# Global sliding window shared by every user: at most N prompts per window.
+LLM_RATE_LIMIT = int(os.environ.get("ICARUS_LLM_RATE_LIMIT", "10"))
+LLM_RATE_WINDOW = int(os.environ.get("ICARUS_LLM_RATE_WINDOW", "300"))
+# Prompts per browser session before the user is asked to self-host or get in
+# touch (0 = unlimited).
+LLM_SESSION_LIMIT = int(os.environ.get("ICARUS_LLM_SESSION_LIMIT", "10"))
+# Hard cap on one prompt's size (system + user prompt, in characters). A normal
+# prompt is ~10-15k characters; this only stops pathological inputs.
+LLM_MAX_PROMPT_CHARS = int(os.environ.get("ICARUS_LLM_MAX_PROMPT_CHARS", "40000"))
+# Cap on the user-editable concept definition, the main free-text prompt input.
+MAX_DEFINITION_CHARS = int(os.environ.get("ICARUS_MAX_DEFINITION_CHARS", "4000"))
+# Invite codes (comma-separated) that lift both limits above for a browser: open the
+# demo once as `/?invite=<code>` and the code is remembered in that browser. Only
+# the API key's workspace spend limit still applies to invited users.
+INVITE_CODES = [c.strip() for c in os.environ.get("ICARUS_INVITE_CODES", "").split(",")
+                if c.strip()]
+# Shown to users who hit the per-session limit (e.g. an email address or URL).
+CONTACT = os.environ.get("ICARUS_CONTACT", "https://github.com/sfluegel05/icarus/issues/new")
+# Append-only JSONL log of every model call (prompt, response, cost, session, client).
+LLM_PROMPT_LOG = os.environ.get(
+    "ICARUS_LLM_PROMPT_LOG", os.path.join(ICARUS_DATA, "llm_log", "prompts.jsonl"))
 
 
 # External data files this app reads (everything else it generates itself). Kept

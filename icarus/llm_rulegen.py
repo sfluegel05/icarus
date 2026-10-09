@@ -11,10 +11,14 @@ in-memory session instead of a class's on-disk ``exs.pl``.
 The concept's definition is central LLM input. When the session was seeded from a
 ChEBI class we start from that class's real definition/siblings; the user can edit
 the definition text in the UI, and the edited text is what reaches the model here
-(``info['definition']``). The pipeline stores every predicate it writes in a
-session-local library (``config.LLM_LIBRARY_DIR``), so later learns can reuse them.
-The library also acts as a cache: a ChEBI class that already has a stored hypothesis
-is assembled from it without calling the model again.
+(``info['definition']``).
+
+The rule library (``config.LLM_LIBRARY_DIR``) is a **read-only** resource: the
+pipeline retrieves reuse candidates from it, but each run works on a throwaway copy,
+so nothing a session generates (from possibly edited examples or definition) is ever
+written back. The library also acts as a cache: a ChEBI class that already has a
+stored hypothesis is assembled from it without calling the model, unless the user
+explicitly asks for a fresh model call (``use_cache=False``).
 
 After the pipeline runs we read the kept auxiliary rules and the class hypothesis
 back out and assemble one self-contained rule — the auxiliary clauses followed by
@@ -26,7 +30,7 @@ import contextlib
 import io
 import os
 import re
-import threading
+import shutil
 
 import pandas as pd
 from rdkit import Chem
@@ -43,7 +47,9 @@ from chebILP.predicate_generation.generate_auxiliary_rules import (
 )
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
-from . import config
+from . import config, llm_guard
+
+llm_guard.install()
 
 TARGET = config.TARGET_LABEL
 
@@ -51,10 +57,6 @@ TARGET = config.TARGET_LABEL
 # session seeded from a class uses that class's real id; an ad-hoc SMILES-only
 # session has none, so it learns under this dummy id.
 _GENERIC_ID = "0"
-
-# The rule library is one set of JSON files shared by every session; the pipeline
-# reads and rewrites them, so concurrent runs (other tabs / users) are serialised.
-_LIBRARY_LOCK = threading.Lock()
 
 
 def _rows(mols) -> pd.DataFrame:
@@ -153,13 +155,12 @@ def _build_info(concept: dict) -> tuple[str, dict]:
     return chebi_id, info
 
 
-def _clause_text(source: str) -> str:
-    """Just the clause lines of a program (its ``%`` header comments stripped)."""
-    return "\n".join(l for l in source.splitlines() if not l.strip().startswith("%")).strip()
-
-
 def _assemble_rule(programs, hypothesis: str, chebi_id: str) -> str:
-    """Kept auxiliary clauses + the class hypothesis, head renamed to ``concept``."""
+    """Kept auxiliary programs + the class hypothesis, head renamed to ``concept``.
+
+    Each program keeps its ``% PREDICATE_NAME`` / ``% DESCRIPTION`` header: predicates
+    generated in a run are not in the (read-only) library, so the rule itself is where
+    the NL translation and the block palette find their descriptions."""
     head = f"chebi_{chebi_id}"
     hypothesis = re.sub(rf"\b{re.escape(head)}\b", TARGET, hypothesis).strip()
     if not hypothesis.endswith("."):
@@ -169,51 +170,72 @@ def _assemble_rule(programs, hypothesis: str, chebi_id: str) -> str:
         if prog.name in seen:
             continue
         seen.add(prog.name)
-        text = _clause_text(prog.source)
+        text = prog.source.strip()
         if text:
             blocks.append(text)
     blocks.append(hypothesis)
     return "\n\n".join(blocks)
 
 
-def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None) -> dict:
+def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None,
+                    admit=None, use_cache=True) -> dict:
     """Generate a concept rule with the chebILP LLM pipeline.
 
-    ``timeout`` is unused (the model call is bounded by the CLI); it is accepted so the
-    three backends share one signature. ``concept`` carries ``{name, chebi_id,
-    definition}`` for the prompt. Returns ``{"rule", "score", "error"?}``.
+    ``timeout`` is unused (the model calls are bounded by ``config.LLM_TIMEOUT``, see
+    ``llm_guard.deadline``); it is accepted so the three backends share one signature. ``concept`` carries ``{name, chebi_id,
+    definition}`` for the prompt. ``admit()``, if given, is called right before the
+    model is prompted and returns a refusal message (quota used up) or ``None``.
+    ``use_cache=False`` skips the library's stored hypothesis and prompts the model.
+    Returns ``{"rule", "score", "cached"?, "error"?}``.
     """
     if not pos_mols or not neg_mols:
         return {"rule": None, "score": None,
                 "error": "Need at least one positive and one negative example."}
 
-    if not _LIBRARY_LOCK.acquire(blocking=False):
-        on_line("Waiting for another LLM run to finish (the rule library is shared)…")
-        _LIBRARY_LOCK.acquire()
-    try:
-        return _learn_locked(pos_mols, neg_mols, on_line, model, concept)
-    finally:
-        _LIBRARY_LOCK.release()
-
-
-def _learn_locked(pos_mols, neg_mols, on_line, model, concept) -> dict:
     chebi_id, info = _build_info(concept or {})
     library_dir = config.LLM_LIBRARY_DIR
 
     # The library doubles as a cache: a ChEBI class that already has a stored
     # hypothesis is served from it instead of a new model call. (Not for the generic
     # id, which every ad-hoc SMILES-only concept shares.)
-    if chebi_id != _GENERIC_ID and os.path.isdir(library_dir):
+    if use_cache and chebi_id != _GENERIC_ID and os.path.isdir(library_dir):
         cached = _stored_result(chebi_id, library_dir)
         if cached is not None:
-            on_line(f"Using the stored hypothesis for CHEBI:{chebi_id} from the rule library "
-                    "(no LLM call).")
+            on_line(f"The rule library already holds an LLM-generated rule for "
+                    f"CHEBI:{chebi_id} — using this cached result (no LLM call).")
+            on_line("It was generated earlier from the original ChEBI class, not from "
+                    "your current examples or definition edits.")
+            on_line('To generate a fresh rule for your current examples and definition, '
+                    'click "Prompt the LLM".')
             cached["score"] = _session_score(cached["rule"], pos_mols, neg_mols)
+            cached["cached"] = True
             return cached
 
+    if admit is not None:
+        refusal = admit()
+        if refusal:
+            on_line(refusal)  # keep it visible in the output panel, not only the toast
+            return {"rule": None, "score": None, "error": refusal}
+
+    from . import ilp
+
+    # The pipeline writes what it generates into its library; give it a throwaway
+    # copy so the shared library stays read-only (and concurrent runs can't collide).
+    with ilp.run_dir("llm_") as work_dir:
+        run_library = os.path.join(work_dir, "rule_library")
+        if os.path.isdir(library_dir):
+            shutil.copytree(library_dir, run_library,
+                            ignore=shutil.ignore_patterns("generation_logs"))
+        else:
+            os.makedirs(run_library)
+        return _generate(chebi_id, info, pos_mols, neg_mols, on_line, model,
+                         run_library, work_dir)
+
+
+def _generate(chebi_id, info, pos_mols, neg_mols, on_line, model, library_dir,
+              work_dir) -> dict:
     pos_rows, neg_rows = _rows(pos_mols), _rows(neg_mols)
-    os.makedirs(library_dir, exist_ok=True)
-    problem_dir = os.path.join(config.WORK_DIR, "llm_problems")  # unused (class_context overridden)
+    problem_dir = os.path.join(work_dir, "problems")  # unused (class_context overridden)
 
     gen = _SessionRuleGenerator(
         library_dir, model, config.LLM_N_PREDICATES, config.LLM_TOP_K,
@@ -227,15 +249,27 @@ def _learn_locked(pos_mols, neg_mols, on_line, model, concept) -> dict:
             + (f" (concept: {info['name']})" if info.get("name") else "") + "…")
     # The pipeline reports its progress (predicates kept/repaired, hypothesis F1) via
     # print(); forward those lines into the live log.
+    timeout_msg = (f"The LLM did not finish within the time limit of "
+                   f"{config.LLM_TIMEOUT} s; no rule was learned. Try again, or use "
+                   "fewer/simpler examples.")
     try:
-        with contextlib.redirect_stdout(_StreamToLog(on_line)):
-            gen.generate_for_class(chebi_id, info)
+        with llm_guard.deadline(config.LLM_TIMEOUT), \
+                llm_guard.progress(on_line, info.get("name"), len(pos_mols), len(neg_mols)), \
+                contextlib.redirect_stdout(_StreamToLog(on_line)):
+            try:
+                gen.generate_for_class(chebi_id, info)
+            finally:
+                timed_out = llm_guard.expired()
+    except llm_guard.LLMTimeout:
+        return {"rule": None, "score": None, "error": timeout_msg}
     except Exception as e:
         return {"rule": None, "score": None, "error": f"LLM pipeline failed: {e}"}
 
     # Read the pipeline's stored result back out and assemble the icarus rule.
     result = _stored_result(chebi_id, library_dir)
     if result is None:
+        if timed_out:
+            return {"rule": None, "score": None, "error": timeout_msg}
         return {"rule": None, "score": None,
                 "error": "The pipeline did not produce a usable hypothesis."}
     return result

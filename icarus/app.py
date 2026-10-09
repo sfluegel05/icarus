@@ -23,7 +23,7 @@ from starlette.staticfiles import StaticFiles
 
 from chebi_utils.read_molecule import smiles_or_inchi_to_mol
 
-from . import config, data_store, ilp, predicates, render, similarity
+from . import config, data_store, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
 
 
@@ -107,7 +107,11 @@ def state_dict(s: Session) -> dict:
             "definition": s.concept_definition,
         },
         # Shown next to the "LLM" learn method, so it is clear which model runs.
-        "llm_model": config.LLM_MODEL,
+        "llm_model": config.LLM_MODEL_NAME,
+        "llm_quota": {"used": s.llm_prompts, "invited": s.invited,
+                      "limit": 0 if s.invited else config.LLM_SESSION_LIMIT},
+        "max_definition_chars": config.MAX_DEFINITION_CHARS,
+        "default_timeout": config.DEFAULT_TIMEOUT,
     }
     if s.current_rule:
         out["report"] = _report(s, preds)
@@ -155,13 +159,30 @@ def with_session(handler):
         sid = _session_id(request)
         if sid is None:
             return JSONResponse({"error": "Missing or invalid session id."}, status_code=400)
-        return await handler(request, SESSIONS.get(sid))
+        s = SESSIONS.get(sid)
+        if not s.invited and llm_guard.is_invite(request.headers.get("x-invite-code")):
+            s.invited = True
+        return await handler(request, s)
     return wrapper
 
 
 # ── endpoints ───────────────────────────────────────────────────────────────
+def _page(name: str) -> FileResponse:
+    # Revalidate like the static files: a heuristically cached old index.html paired
+    # with a fresh app.js misses elements the new script expects.
+    return FileResponse(f"{config.WEB_DIR}/{name}", headers={"Cache-Control": "no-cache"})
+
+
 async def index(request: Request):
-    return FileResponse(f"{config.WEB_DIR}/index.html")
+    return _page("index.html")
+
+
+async def tutorial(request: Request):
+    return _page("tutorial.html")
+
+
+async def about(request: Request):
+    return _page("about.html")
 
 
 async def depict(request: Request):
@@ -255,7 +276,9 @@ async def api_predicates(request: Request, s: Session):
     return JSONResponse({
         "catalog": predicates.catalog(),
         "aux": predicates.aux_blocks(config.LLM_LIBRARY_DIR,
-                                     names=_class_aux_names(concept, rule)),
+                                     names=_class_aux_names(concept, rule),
+                                     rule_descriptions=ilp.rule_aux_descriptions(rule),
+                                     rule=rule),
         "target": config.TARGET_LABEL,
     })
 
@@ -326,8 +349,13 @@ async def session_reset(request: Request, s: Session):
 async def concept_definition(request: Request, s: Session):
     """Update the editable concept definition passed to the LLM pipeline."""
     body = await request.json()
+    definition = body.get("definition") or ""
+    if len(definition) > config.MAX_DEFINITION_CHARS:
+        return JSONResponse(
+            {"error": f"The definition is too long ({len(definition)} characters, limit "
+                      f"{config.MAX_DEFINITION_CHARS})."}, status_code=400)
     with s.lock:
-        s.concept_definition = (body.get("definition") or "")
+        s.concept_definition = definition
         return ok(s)
 
 
@@ -380,17 +408,20 @@ async def suggest_accept(request: Request, s: Session):
 
 
 # How each method is named in the UI's live-output panel and status messages.
-_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": f"LLM ({config.LLM_MODEL})"}
+_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": f"LLM ({config.LLM_MODEL_NAME})"}
 
 
-def _learn_worker(s, pos, neg, timeout, method, model, concept):
+def _learn_worker(s, pos, neg, timeout, method, concept, log_fields, use_cache=True):
     def on_line(line):
         with s.learn_lock:
             s.learn["lines"].append(line)
 
     try:
-        result = ilp.learn_dispatch(method, pos, neg, timeout, on_line,
-                                    model=model, concept=concept)
+        with llm_guard.context(**log_fields):
+            result = ilp.learn_dispatch(method, pos, neg, timeout, on_line,
+                                        model=config.LLM_MODEL, concept=concept,
+                                        admit=lambda: llm_guard.admit(s),
+                                        use_cache=use_cache)
     except Exception as e:
         traceback.print_exc()
         with s.learn_lock:
@@ -400,7 +431,12 @@ def _learn_worker(s, pos, neg, timeout, method, model, concept):
     rule = result.get("rule")
     with s.lock:
         if rule:
-            entry = s.add_rule(method, rule)
+            # Name the model that wrote an LLM rule (a cached library rule was written
+            # earlier, possibly by another model).
+            model = None
+            if method == "llm":
+                model = "cached" if result.get("cached") else config.LLM_MODEL_NAME
+            entry = s.add_rule(method, rule, model=model)
             try:
                 entry.confusion = _confusion(s, recompute_predictions(s))
             except ilp.RuleError:
@@ -408,7 +444,10 @@ def _learn_worker(s, pos, neg, timeout, method, model, concept):
     with s.learn_lock:
         s.learn.update(
             running=False, done=True, score=result.get("score"),
-            message=("Learned a rule." if rule else
+            cached=bool(rule and result.get("cached")),
+            message=("Loaded the cached LLM rule from the rule library." if rule and
+                     result.get("cached") else
+                     "Learned a rule." if rule else
                      result.get("error") or
                      "No rule found within the time limit "
                      "(try more/cleaner examples or a longer timeout)."),
@@ -425,13 +464,19 @@ async def learn(request: Request, s: Session):
     method = str(body.get("method") or config.DEFAULT_LEARN_METHOD).lower()
     if method not in config.LEARN_METHODS:
         return JSONResponse({"error": f"Unknown method '{method}'."}, status_code=400)
-    model = body.get("model") or config.LLM_MODEL
+    # "Prompt the LLM": bypass the rule library's cached rule for the class.
+    use_cache = not body.get("fresh")
+    # The model is server-configured only (never taken from the request), so a client
+    # can't switch the demo's budget to a pricier model.
+    log_fields = {"session": _session_id(request),
+                  "client": request.client.host if request.client else None,
+                  "user_agent": request.headers.get("user-agent"), "invited": s.invited}
 
     with s.learn_lock:
         if s.learn["running"]:
             return JSONResponse({"error": "Already learning."}, status_code=409)
         s.learn.update(running=True, done=False, error=None, lines=[], message=None,
-                       score=None, method=method)
+                       score=None, method=method, cached=False)
 
     with s.lock:
         pos = s.positives()
@@ -446,7 +491,8 @@ async def learn(request: Request, s: Session):
         return JSONResponse(
             {"error": "Need at least one positive and one negative example."}, status_code=400)
 
-    threading.Thread(target=_learn_worker, args=(s, pos, neg, timeout, method, model, concept),
+    threading.Thread(target=_learn_worker,
+                     args=(s, pos, neg, timeout, method, concept, log_fields, use_cache),
                      daemon=True).start()
     return JSONResponse({"started": True})
 
@@ -458,9 +504,11 @@ async def learn_progress(request: Request, s: Session):
         lines = list(s.learn["lines"])
         running, done, error = s.learn["running"], s.learn["done"], s.learn["error"]
         message, score, method = s.learn["message"], s.learn["score"], s.learn["method"]
+        cached = s.learn.get("cached", False)
     resp = {
         "running": running, "done": done, "error": error, "message": message,
         "score": score, "method": method, "method_label": _METHOD_LABELS.get(method, method),
+        "cached": cached,
         "tail": lines[-6:], "log": "\n".join(lines), "total_lines": len(lines),
     }
     if done and not error:
@@ -530,6 +578,8 @@ async def rules_reevaluate(request: Request, s: Session):
 
 routes = [
     Route("/", index),
+    Route("/tutorial", tutorial),
+    Route("/about", about),
     Route("/api/depict", depict),
     Route("/api/explain", explain),
     Route("/api/state", api_state),

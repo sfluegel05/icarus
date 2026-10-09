@@ -55,10 +55,14 @@ to arbitrary molecules.
      if weak, and the kept auxiliary clauses plus the `concept(A) :- …` hypothesis are
      assembled into one self-contained rule. The **concept definition** is shown in an
      editable box once you seed from a ChEBI class — edit it and the edited text is
-     what the model sees (in place of the original ChEBI definition). Predicates the
-     pipeline writes are kept in a session-local library and reused across learns.
-     A ChEBI class that already has a stored hypothesis (`hypotheses.json`) is served
-     from the library without a new model call (rescored on the current examples).
+     what the model sees (in place of the original ChEBI definition). The rule
+     library (`data/rule_library`) is **read-only**: the pipeline retrieves reusable
+     predicates from it, but each run works on a throwaway copy, so nothing generated
+     from a session's (possibly edited) examples or definition is written back. A
+     ChEBI class that already has a stored hypothesis (`hypotheses.json`) is served
+     from the library without a model call (rescored on the current examples, and
+     the log says it was cached); a **Prompt the LLM** button then asks the model for
+     a fresh rule from the current examples and definition.
    - **Library-augmented background (Popper / Aleph)** — when the concept has a
      definition, the `ICARUS_ILP_LIBRARY_TOP_N` (default 8) library predicates most
      relevant to it (chebILP's `HybridPredicateRetriever`, BM25 over name +
@@ -166,6 +170,7 @@ whether both files were located and names any that are missing.
 | `ICARUS_POOL_SIZE` | `12000` | Molecules fingerprinted for suggestions |
 | `ICARUS_PORT` | `8000` | HTTP port |
 | `ICARUS_LLM_MODEL` | `claude-haiku-4-5` | Model id for the LLM backend (local `claude` CLI) |
+| `ICARUS_LLM_MODEL_NAME` | the model id | Human-readable model name shown in the UI (method selector, rule history) |
 
 API config for the LLM backend (`OPENAI_API_BASE` / `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`) is read from a `.env` file in this repo's root, if present.
@@ -174,12 +179,41 @@ The LLM backend calls the locally logged-in `claude` CLI (via the Claude Agent S
 and bills to that subscription; it needs the CLI installed and `/login`-ed, and the
 Aleph backend needs `swipl` on `PATH`.
 
+### Public deployment (API key, limits, prompt log)
+
+To bill an Anthropic API key instead of a subscription, put `ANTHROPIC_API_KEY=sk-ant-…`
+in `.env` and set `ICARUS_LLM_AUTH=api_key`. The `claude` CLI bundled with
+`claude-agent-sdk` then uses the key, so no `/login` is needed on the server. Also
+set a spend limit on the key's workspace in the Anthropic Console as the hard cap.
+`icarus/llm_guard.py` enforces these limits:
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `ICARUS_LLM_AUTH` | `subscription` | `api_key` = let the CLI bill `ANTHROPIC_API_KEY` |
+| `ICARUS_LLM_RATE_LIMIT` / `ICARUS_LLM_RATE_WINDOW` | `10` / `300` | Global: at most N LLM prompts per window (seconds), across all users |
+| `ICARUS_LLM_SESSION_LIMIT` | `10` | LLM prompts per browser session before the user is asked to self-host / get in touch (`0` = off) |
+| `ICARUS_CONTACT` | — | Contact (email/URL) named in that message |
+| `ICARUS_INVITE_CODES` | — | Comma-separated codes; a browser that opened `/?invite=<code>` once skips both limits above |
+| `ICARUS_LLM_MAX_PROMPT_CHARS` | `40000` | A larger prompt is refused before it is sent (normal: ~10–15k) |
+| `ICARUS_MAX_DEFINITION_CHARS` | `4000` | Max length of the editable concept definition |
+| `ICARUS_LLM_PROMPT_LOG` | `data/llm_log/prompts.jsonl` | Append-only log of every model call: prompt, response, cost, session, client IP |
+
+A "prompt" is one LLM learn that reaches the model; answers served from the rule
+library cache are free. The model is configured on the server only. Behind a
+reverse proxy on the same host, uvicorn trusts its `X-Forwarded-For` by default, so
+the log records the real client IP.
+
+The per-session count lives in the in-memory session: it is dropped when the session
+has been idle for 12 h or the server restarts, and a new browser tab starts a fresh
+session. That makes it a nudge rather than a barrier; the global window is the limit
+that actually protects the budget. To revoke an invite code, remove it from
+`ICARUS_INVITE_CODES` and restart the server.
+
 ## Notes / limitations (it's a demo)
 
 - One in-memory session per browser tab (keyed by a random id in `sessionStorage`,
   so a reload keeps it; a duplicated tab starts fresh). Sessions are not persisted,
-  are dropped after 12 h idle (at most 200 kept), and there is no auth. LLM learns
-  are serialised, since they share the on-disk rule library.
+  are dropped after 12 h idle (at most 200 kept), and there is no auth.
 - Learning runs in a background thread (the UI polls for live output); the `timeout`
   bounds the Popper and Aleph searches, while the LLM call is bounded by the CLI.
 - The Popper/Aleph bias is kept small (low-arity atom predicates, `max_vars`/`max_body`

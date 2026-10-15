@@ -6,17 +6,19 @@ its clingo-based rule evaluation, so the demo stays consistent with the main
 pipeline.
 """
 
+import contextlib
 import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import pandas as pd
 
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
-from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_problem_builder import build_background_chemlog
 from chebILP.utils import split_prolog_literals
 
@@ -166,6 +168,18 @@ def _bias_lines(body_predicates) -> list[str]:
     return lines
 
 
+@contextlib.contextmanager
+def run_dir(prefix: str):
+    """A fresh working directory under ``config.WORK_DIR`` for one learning run,
+    removed afterwards — concurrent runs (other tabs / users) must not overwrite
+    each other's problem files."""
+    path = tempfile.mkdtemp(prefix=prefix, dir=config.WORK_DIR)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def write_problem(work_dir, pos_mols, neg_mols, concept=None, on_line=None):
     """Write exs.pl, bk.pl and bias.pl for the labelled molecules. Returns paths.
 
@@ -194,26 +208,12 @@ def write_problem(work_dir, pos_mols, neg_mols, concept=None, on_line=None):
     return exs_path, bk_path, bias_path
 
 
-def learn(pos_mols, neg_mols, timeout=None) -> dict:
-    """Run noisy (MDL) Popper on the labelled molecules.
-
-    Returns ``{"rule": str|None, "score": {...}|None}``.
-    """
-    if not pos_mols or not neg_mols:
-        return {"rule": None, "score": None, "error": "Need at least one positive and one negative example."}
-
-    timeout = timeout or config.DEFAULT_TIMEOUT
-    exs_path, bk_path, bias_path = write_problem(config.WORK_DIR, pos_mols, neg_mols)
-
-    settings = {"timeout": timeout, "noisy": True}  # MDL cost fn: best rule, need not separate perfectly
-    result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings)
-    rule = result.get("prog_str")
-    score = result.get("score")
-    score_dict = None
-    if score:
-        tp, fn, tn, fp = score
-        score_dict = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
-    return {"rule": rule, "score": score_dict}
+def score_dict(score) -> dict | None:
+    """An ILP learner's ``(tp, fn, tn, fp)`` score tuple as a confusion dict."""
+    if not score:
+        return None
+    tp, fn, tn, fp = score
+    return {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
 
 
 _RESULT_MARKER = "__ICARUS_RESULT__"
@@ -244,39 +244,38 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
                 "error": "Need at least one positive and one negative example."}
 
     timeout = timeout or config.DEFAULT_TIMEOUT
-    exs_path, bk_path, bias_path = write_problem(config.WORK_DIR, pos_mols, neg_mols,
-                                                 concept=concept, on_line=on_line)
-    # Noisy: Popper minimises an MDL cost, returning the best rule found even when none
-    # perfectly separates the examples (rather than failing to return one).
-    settings = {"timeout": timeout, "noisy": True}
-    script = _training_script(exs_path, bk_path, bias_path, settings)
+    with run_dir("popper_") as work_dir:
+        exs_path, bk_path, bias_path = write_problem(work_dir, pos_mols, neg_mols,
+                                                     concept=concept, on_line=on_line)
+        # Noisy: Popper minimises an MDL cost, returning the best rule found even when none
+        # perfectly separates the examples (rather than failing to return one).
+        settings = {"timeout": timeout, "noisy": True}
+        script = _training_script(exs_path, bk_path, bias_path, settings)
 
-    proc = subprocess.Popen(
-        [sys.executable, "-u", "-c", script],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-        start_new_session=True, cwd=config.WORK_DIR,
-    )
-    result = {"rule": None, "score": None}
-    for raw in proc.stdout:
-        line = raw.rstrip("\n")
-        if line.startswith(_RESULT_MARKER):
-            try:
-                data = json.loads(line[len(_RESULT_MARKER):])
-                result["rule"] = data.get("prog_str")
-                sc = data.get("score")
-                if sc:
-                    tp, fn, tn, fp = sc
-                    result["score"] = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
-            except Exception:
-                pass
-            continue
-        if line.strip():
-            on_line(line)
-    proc.wait()
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            start_new_session=True, cwd=work_dir,
+        )
+        result = {"rule": None, "score": None}
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if line.startswith(_RESULT_MARKER):
+                try:
+                    data = json.loads(line[len(_RESULT_MARKER):])
+                    result["rule"] = data.get("prog_str")
+                    result["score"] = score_dict(data.get("score"))
+                except Exception:
+                    pass
+                continue
+            if line.strip():
+                on_line(line)
+        proc.wait()
     return result
 
 
-def learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model=None, concept=None) -> dict:
+def learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model=None, concept=None,
+                   admit=None, use_cache=True) -> dict:
     """Route a learn request to one of the three rule-generation backends.
 
     Every backend returns the same shape — ``{"rule": str|None, "score":
@@ -284,15 +283,10 @@ def learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model=None, con
     caller (and everything downstream: classify, NL, explain) is method-agnostic.
     ``on_line`` receives progress lines for the live log. ``concept`` (name / chebi_id
     / editable definition) feeds the LLM pipeline's prompt and, for Popper / Aleph,
-    the retrieval of library predicates that augment the background.
+    the retrieval of library predicates that augment the background. ``admit`` is the
+    LLM quota check (``llm_guard.admit``); the ILP backends ignore it, as they do
+    ``use_cache`` (``False`` = prompt the LLM even if the library has a cached rule).
     """
-    try:
-        return _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept)
-    finally:
-        _NL_CACHE.clear()  # the run may have changed library aux descriptions
-
-
-def _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept) -> dict:
     if method in ("popper", "aleph"):
         if method == "popper":
             result = learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=concept)
@@ -310,7 +304,8 @@ def _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept
 
         return llm_rulegen.learn_streaming(
             pos_mols, neg_mols, timeout, on_line,
-            model=model or config.LLM_MODEL, concept=concept,
+            model=model or config.LLM_MODEL, concept=concept, admit=admit,
+            use_cache=use_cache,
         )
     return {"rule": None, "score": None, "error": f"Unknown learning method: {method!r}"}
 
@@ -396,30 +391,66 @@ def _clause_head(clause: str) -> str | None:
 
 
 # NL per rule text. The state is re-sent after every UI action (relabel, remove, …),
-# and re-translating an unchanged rule each time slowed those round-trips. Cleared
-# by ``learn_dispatch`` since a learn run may add/rewrite library aux descriptions.
-_NL_CACHE: dict[str, str | None] = {}
+# and re-translating an unchanged rule each time slowed those round-trips.
+_NL_CACHE: dict[tuple, str | None] = {}
+_LIB_DESCRIPTIONS: dict[str, str] | None = None
+
+_HEADER_RE = re.compile(r"^%\s*(PREDICATE_NAME|DESCRIPTION)\s*:\s*(.+?)\s*$", re.IGNORECASE)
 
 
-def _translate_one(rule_text: str) -> str | None:
+def rule_aux_descriptions(rule: str) -> dict[str, str]:
+    """``aux_name -> description`` from the ``% PREDICATE_NAME`` / ``% DESCRIPTION``
+    headers a rule carries for the auxiliary programs it defines (an LLM rule's newly
+    generated predicates are not in the read-only library, only in the rule)."""
+    out, name = {}, None
+    for line in (rule or "").splitlines():
+        m = _HEADER_RE.match(line.strip())
+        if not m:
+            continue
+        if m.group(1).upper() == "PREDICATE_NAME":
+            name = m.group(2)
+        elif name:
+            out[name] = m.group(2)
+    return out
+
+
+def _aux_header(name: str, descriptions: dict[str, str]) -> str:
+    desc = descriptions.get(name)
+    return f"% PREDICATE_NAME: {name}\n% DESCRIPTION: {desc}\n" if desc else ""
+
+
+def _library_descriptions() -> dict[str, str]:
+    """Descriptions of the (read-only) library's aux predicates, loaded once."""
+    global _LIB_DESCRIPTIONS
+    if _LIB_DESCRIPTIONS is None:
+        try:
+            from chebILP.explainability.rule_to_nl import load_aux_descriptions
+            _LIB_DESCRIPTIONS = load_aux_descriptions(config.LLM_LIBRARY_DIR)
+        except Exception:
+            _LIB_DESCRIPTIONS = {}
+    return _LIB_DESCRIPTIONS
+
+
+def _translate_one(rule_text: str, extra: dict[str, str] | None = None) -> str | None:
     """NL for a *single-head* rule via chebILP's ``translate_rule``, annotating any
-    ``aux_`` references with their descriptions from the session predicate library."""
+    ``aux_`` references with their descriptions from the predicate library, or from
+    ``extra`` (the descriptions the full rule carries in its headers)."""
     if not rule_text:
         return None
-    if rule_text not in _NL_CACHE:
-        _NL_CACHE[rule_text] = _translate_uncached(rule_text)
-    return _NL_CACHE[rule_text]
+    key = (rule_text, tuple(sorted((extra or {}).items())))
+    if key not in _NL_CACHE:
+        _NL_CACHE[key] = _translate_uncached(rule_text, extra or {})
+    return _NL_CACHE[key]
 
 
-def _translate_uncached(rule_text: str) -> str | None:
+def _translate_uncached(rule_text: str, extra: dict[str, str]) -> str | None:
     try:
         from chebILP.explainability.rule_to_nl import translate_rule
     except Exception:
         return None
     kwargs = {}
-    lib = config.LLM_LIBRARY_DIR
-    if os.path.isdir(lib) and "aux_library_dir" in inspect.signature(translate_rule).parameters:
-        kwargs["aux_library_dir"] = lib
+    if "aux_descriptions" in inspect.signature(translate_rule).parameters:
+        kwargs["aux_descriptions"] = {**_library_descriptions(), **extra}
     try:
         return translate_rule(rule_text, **kwargs)
     except Exception:
@@ -453,21 +484,21 @@ def rule_to_nl_parts(rule: str) -> dict | None:
     # The main hypothesis is the target predicate; everything else is auxiliary.
     main_head = TARGET if TARGET in groups else order[-1]
     main_text = "\n".join(groups[main_head])
+    descriptions = rule_aux_descriptions(rule)
     parts = {
-        "main": {"head": main_head, "rule": main_text, "nl": _translate_one(main_text)},
+        "main": {"head": main_head, "rule": main_text,
+                 "nl": _translate_one(main_text, descriptions)},
         "aux": [],
     }
     for name in order:
         if name == main_head:
             continue
         text = "\n".join(groups[name])
-        parts["aux"].append({"name": name, "rule": text, "nl": _translate_one(text)})
+        # The aux box keeps the description header, so a rule the UI reassembles from
+        # the boxes still carries it.
+        parts["aux"].append({"name": name, "rule": _aux_header(name, descriptions) + text,
+                             "nl": _translate_one(text, descriptions)})
     return parts
-
-
-def rule_to_nl(rule: str) -> str | None:
-    """Natural-language paraphrase of a single-head learned/edited rule (chebILP)."""
-    return _translate_one(rule)
 
 
 _ANON_VAR_RE = re.compile(r"(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])")

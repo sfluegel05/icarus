@@ -10,7 +10,8 @@ import os
 import pickle
 import random
 
-from rdkit import DataStructs
+import numpy as np
+from rdkit import Chem, DataStructs
 from rdkit.Chem import rdFingerprintGenerator
 
 from . import config, data_store
@@ -98,13 +99,11 @@ def suggest(positive_mols, exclude_chebi_ids, exclude_smiles, n=10, mmr_lambda=_
     exclude_chebi_ids = set(exclude_chebi_ids)
     exclude_smiles = set(exclude_smiles)
 
-    # 1. Relevance of every (non-excluded) pool molecule to the positives.
-    scored = []  # (rel, cid, fp)
-    for cid, fp in zip(_POOL_IDS, _POOL_FPS):
-        if cid in exclude_chebi_ids:
-            continue
-        rel = max(DataStructs.BulkTanimotoSimilarity(fp, pos_fps))
-        scored.append((rel, cid, fp))
+    # 1. Relevance of every (non-excluded) pool molecule to the positives: one bulk
+    #    comparison per positive, then the max over positives.
+    rels = np.max([DataStructs.BulkTanimotoSimilarity(p, _POOL_FPS) for p in pos_fps], axis=0)
+    scored = [(rel, cid, fp) for rel, cid, fp in zip(rels, _POOL_IDS, _POOL_FPS)
+              if cid not in exclude_chebi_ids]  # (rel, cid, fp)
     scored.sort(key=lambda t: t[0], reverse=True)
 
     # 2. Restrict MMR to a relevance shortlist (bounds cost and keeps everything
@@ -152,27 +151,18 @@ def suggest(positive_mols, exclude_chebi_ids, exclude_smiles, n=10, mmr_lambda=_
         canon = smiles
         if mol is not None:
             try:
-                from rdkit import Chem
-
                 canon = Chem.MolToSmiles(mol)
             except Exception:
                 pass
         if smiles in exclude_smiles or canon in exclude_smiles:
             continue
-        definition = row.get("DEFINITION")
-        try:
-            import math
-
-            if isinstance(definition, float) and math.isnan(definition):
-                definition = None
-        except Exception:
-            pass
+        definition = row.get("DEFINITION")  # NaN when missing
         out.append(
             {
                 "chebi_id": cid,
                 "name": str(row.get("ChEBI NAME") or f"CHEBI:{cid}"),
                 "smiles": smiles,
-                "definition": str(definition) if definition else None,
+                "definition": definition if isinstance(definition, str) and definition else None,
                 "similarity": round(float(rels[i]), 3),
             }
         )

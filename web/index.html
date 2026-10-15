@@ -4,13 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ICaRuS — Interactive ChemicAl RUle System</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
-  <header>
-    <h1>ICaRuS <span class="subtitle">Interactive ChemicAl RUle System</span></h1>
-    <div class="header-actions">
+  <header class="navbar">
+    <div class="navbar-left">
+      <h1 class="logo"><a href="./" title="Interactive ChemicAl RUle System">ICaRuS</a></h1>
+      <nav class="nav-links">
+        <a href="./">Learn</a>
+        <a href="tutorial">Tutorial</a>
+        <a href="about">About</a>
+        <a href="https://github.com/sfluegel05/icarus/issues/new" target="_blank" rel="noopener">Report an Issue</a>
+      </nav>
+    </div>
+    <div class="navbar-right">
       <span id="counts" class="counts"></span>
+      <button id="export-btn" class="ghost" title="Download the examples, concept definition and rule history as a JSON file">Export session</button>
+      <button id="import-btn" class="ghost" title="Replace this session with a previously exported JSON file">Import session</button>
+      <input id="import-file" type="file" accept=".json,application/json" class="hidden">
       <button id="reset-btn" class="ghost">Reset session</button>
     </div>
   </header>
@@ -26,7 +37,7 @@
         <label>Seed from a ChEBI class (optional)</label>
         <div class="class-row">
           <div class="autocomplete">
-            <input id="class-search" type="text" placeholder="Search ChEBI class by name or id (e.g. steroid, 35341)" autocomplete="off">
+            <input id="class-search" type="text" placeholder="Search ChEBI class by name or id (e.g. carboxylic acid, 33575)" autocomplete="off">
             <div id="class-results" class="ac-results hidden"></div>
           </div>
           <label class="mini">pos <input id="max-pos" type="number" value="8" min="1" max="50"></label>
@@ -112,9 +123,13 @@
             <option value="llm">LLM</option>
           </select>
         </label>
-        <label class="mini" id="timeout-wrap">timeout&nbsp;s <input id="timeout" type="number" value="20" min="5" max="120"></label>
+        <label class="mini" id="timeout-wrap">timeout&nbsp;s <input id="timeout" type="number" value="60" min="5" max="120"></label>
         <button id="learn-btn">Learn rule</button>
+        <button id="llm-fresh-btn" class="ghost hidden"
+                title="Prompt the LLM for a fresh rule from your current examples and definition (bypasses the rule library's cached rule).">Prompt the LLM</button>
         <span id="learn-status" class="muted"></span>
+        <button id="llm-conv-btn" class="ghost hidden"
+                title="Download every prompt this session sent to the LLM, with the model's answers (Markdown)">Download LLM conversation</button>
       </div>
 
       <div id="learn-progress" class="learn-progress hidden">
@@ -192,7 +207,7 @@
     </div>
   </div>
 
-  <script src="/static/blocks.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="static/blocks.js"></script>
+  <script src="static/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 """Starlette backend for the ICaRuS demo.
 
-A single in-memory session drives the whole flow:
+Each browser tab has its own in-memory session (see session.SessionStore), which
+drives the whole flow:
   1. seed positive/negative examples from a ChEBI class and/or SMILES/InChI input
   2. get fingerprint-similar suggestions (with ILP predictions once a rule exists)
   3. learn a Prolog rule with Popper, see which molecules it misclassifies
@@ -9,9 +10,12 @@ A single in-memory session drives the whole flow:
 """
 
 import contextlib
+import functools
 import re
 import threading
+import time
 import traceback
+import types
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -19,10 +23,8 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 
-from chebi_utils.read_molecule import smiles_or_inchi_to_mol
-
-from . import config, data_store, ilp, predicates, render, similarity
-from .session import SESSION
+from . import config, data_store, ilp, llm_guard, predicates, render, similarity
+from .session import SESSIONS, Session
 
 
 # ── prediction / reporting helpers ─────────────────────────────────────────
@@ -34,52 +36,52 @@ def _outcome(label: str, predicted: bool) -> str:
     return "pos_pred" if predicted else "neg_pred"  # unlabeled
 
 
-def recompute_predictions() -> dict[str, bool]:
+def recompute_predictions(s: Session) -> dict[str, bool]:
     """Classify every session molecule under the current rule and cache it."""
-    if not SESSION.current_rule:
-        SESSION.last_predictions = {}
+    if not s.current_rule:
+        s.last_predictions = {}
         return {}
-    mols = list(SESSION.molecules.values())
-    preds = ilp.classify(SESSION.current_rule, mols)
-    SESSION.last_predictions = preds
+    mols = list(s.molecules.values())
+    preds = ilp.classify(s.current_rule, mols)
+    s.last_predictions = preds
     return preds
 
 
-def _confusion(preds: dict[str, bool]) -> dict:
+def _confusion(s: Session, preds: dict[str, bool]) -> dict:
     """{TP,FP,TN,FN} counts over the labelled molecules for a prediction map."""
     conf = {"TP": 0, "FP": 0, "TN": 0, "FN": 0}
-    for m in SESSION.labeled():
+    for m in s.labeled():
         conf[_outcome(m.label, preds.get(m.id, False))] += 1
     return conf
 
 
-def _confusion_for_rule(rule: str) -> dict | None:
+def _confusion_for_rule(s: Session, rule: str) -> dict | None:
     """Classify every labelled molecule under ``rule`` and return its confusion
     matrix, or None if the rule fails to evaluate."""
     try:
-        preds = ilp.classify(rule, list(SESSION.molecules.values()))
+        preds = ilp.classify(rule, list(s.molecules.values()))
     except ilp.RuleError:
         return None
-    return _confusion(preds)
+    return _confusion(s, preds)
 
 
-def _report(preds: dict[str, bool]) -> dict:
+def _report(s: Session, preds: dict[str, bool]) -> dict:
     """Confusion matrix + misclassified molecule ids over labelled molecules."""
     mismatches = []
-    for m in SESSION.labeled():
+    for m in s.labeled():
         o = _outcome(m.label, preds.get(m.id, False))
         if o in ("FP", "FN"):
             mismatches.append({"id": m.id, "name": m.name, "smiles": m.smiles,
                                "label": m.label, "outcome": o})
-    return {"confusion": _confusion(preds), "mismatches": mismatches}
+    return {"confusion": _confusion(s, preds), "mismatches": mismatches}
 
 
-def state_dict() -> dict:
-    preds = SESSION.last_predictions if SESSION.current_rule else {}
+def state_dict(s: Session) -> dict:
+    preds = s.last_predictions if s.current_rule else {}
     mols = []
-    for m in SESSION.molecules.values():
+    for m in s.molecules.values():
         d = m.to_dict()
-        if SESSION.current_rule:
+        if s.current_rule:
             p = preds.get(m.id, False)
             d["prediction"] = p
             d["outcome"] = _outcome(m.label, p)
@@ -87,92 +89,146 @@ def state_dict() -> dict:
             d["prediction"] = None
             d["outcome"] = None
         mols.append(d)
-    n_pos = sum(1 for m in SESSION.molecules.values() if m.label == "pos")
-    n_neg = sum(1 for m in SESSION.molecules.values() if m.label == "neg")
-    cur_sig = SESSION.labeled_signature()
+    n_pos = sum(1 for m in s.molecules.values() if m.label == "pos")
+    n_neg = sum(1 for m in s.molecules.values() if m.label == "neg")
+    cur_sig = s.labeled_signature()
     out = {
         "molecules": mols,
         "counts": {"pos": n_pos, "neg": n_neg,
-                   "unlabeled": len(SESSION.molecules) - n_pos - n_neg},
-        "current_rule": SESSION.current_rule,
-        "has_rule": bool(SESSION.current_rule),
+                   "unlabeled": len(s.molecules) - n_pos - n_neg},
+        "current_rule": s.current_rule,
+        "has_rule": bool(s.current_rule),
         # Newest first, so the most recent rule heads the history list.
-        "rule_history": [e.to_dict(cur_sig) for e in reversed(SESSION.rule_history)],
-        "selected_rule_id": SESSION.selected_rule_id,
+        "rule_history": [e.to_dict(cur_sig) for e in reversed(s.rule_history)],
+        "selected_rule_id": s.selected_rule_id,
         "concept": {
-            "name": SESSION.concept_name,
-            "chebi_id": SESSION.concept_chebi_id,
-            "definition": SESSION.concept_definition,
+            "name": s.concept_name,
+            "chebi_id": s.concept_chebi_id,
+            "definition": s.concept_definition,
         },
         # Shown next to the "LLM" learn method, so it is clear which model runs.
-        "llm_model": config.LLM_MODEL,
+        "llm_model": config.LLM_MODEL_NAME,
+        "llm_quota": {"used": s.llm_prompts, "invited": s.invited,
+                      "limit": 0 if s.invited else config.LLM_SESSION_LIMIT},
+        # LLM runs that prompted the model (enables the conversation download).
+        "llm_runs": len(s.llm_runs),
+        "max_definition_chars": config.MAX_DEFINITION_CHARS,
+        "default_timeout": config.DEFAULT_TIMEOUT,
     }
-    if SESSION.current_rule:
-        out["report"] = _report(preds)
-        out["rule_parts"] = ilp.rule_to_nl_parts(SESSION.current_rule)
+    if s.current_rule:
+        out["report"] = _report(s, preds)
+        out["rule_parts"] = ilp.rule_to_nl_parts(s.current_rule)
     return out
 
 
-def _int(v, default):
-    """Parse an int from user input, falling back to ``default`` on bad values."""
+def _int(v, default, lo, hi):
+    """Parse an int from user input, falling back to ``default`` on bad values and
+    clamped to ``[lo, hi]`` so a public client can't ask for unbounded work."""
     try:
-        return int(v)
+        v = int(v)
     except (TypeError, ValueError):
-        return default
+        v = default
+    return min(max(v, lo), hi)
 
 
-def ok(recompute: bool = True, **extra):
+# Bounds on per-request work (request sizes the UI never comes close to).
+_MAX_DEPICT_PX = 1000
+_MAX_SUGGEST = 50
+_MAX_CLASS_EXAMPLES = 100
+_MAX_ADD_LINES = 200
+_MAX_IMPORT_MOLECULES = 1000
+_MAX_IMPORT_RULES = 200
+
+
+def ok(s: Session, recompute: bool = True, **extra):
     # Refresh predictions so any molecule added/relabelled since the last learn is
     # classified before the report is built — otherwise new molecules default to
     # "negative" and skew the confusion matrix / mismatch list. Relabel/remove can't
     # change any prediction, so they pass recompute=False and skip clingo (unless
     # some molecule has no prediction yet).
-    if SESSION.current_rule and (
-            recompute or any(mid not in SESSION.last_predictions for mid in SESSION.molecules)):
+    if s.current_rule and (
+            recompute or any(mid not in s.last_predictions for mid in s.molecules)):
         try:
-            recompute_predictions()
+            recompute_predictions(s)
         except ilp.RuleError:
             pass
-    d = state_dict()
+    d = state_dict(s)
     d.update(extra)
     return JSONResponse(d)
 
 
+# ── session resolution ─────────────────────────────────────────────────────
+def _session_id(request: Request) -> str | None:
+    """The per-tab session id: the ``X-Session-Id`` header sent by ``api()``, or a
+    ``sid`` query parameter (for ``<img>`` URLs, which can't carry headers)."""
+    sid = request.headers.get("x-session-id") or request.query_params.get("sid")
+    return sid if SESSIONS.valid_id(sid) else None
+
+
+def with_session(handler):
+    """Resolve the request's session and pass it to ``handler(request, s)``."""
+    @functools.wraps(handler)
+    async def wrapper(request: Request):
+        sid = _session_id(request)
+        if sid is None:
+            return JSONResponse({"error": "Missing or invalid session id."}, status_code=400)
+        s = SESSIONS.get(sid)
+        if not s.invited and llm_guard.is_invite(request.headers.get("x-invite-code")):
+            s.invited = True
+        return await handler(request, s)
+    return wrapper
+
+
 # ── endpoints ───────────────────────────────────────────────────────────────
+def _page(name: str) -> FileResponse:
+    # Revalidate like the static files: a heuristically cached old index.html paired
+    # with a fresh app.js misses elements the new script expects.
+    return FileResponse(f"{config.WEB_DIR}/{name}", headers={"Cache-Control": "no-cache"})
+
+
 async def index(request: Request):
-    return FileResponse(f"{config.WEB_DIR}/index.html")
+    return _page("index.html")
+
+
+async def tutorial(request: Request):
+    return _page("tutorial.html")
+
+
+async def about(request: Request):
+    return _page("about.html")
 
 
 async def depict(request: Request):
-    """Return an SVG 2D depiction for a session molecule (``id``), a ChEBI
-    molecule (``chebi_id``), or an ad-hoc ``smiles``/InChI string."""
+    """Return an SVG 2D depiction for a session molecule (``id`` + ``sid``) or a ChEBI
+    molecule (``chebi_id``)."""
     q = request.query_params
-    w = _int(q.get("w"), 280)
-    h = _int(q.get("h"), 220)
+    w = _int(q.get("w"), 280, 40, _MAX_DEPICT_PX)
+    h = _int(q.get("h"), 220, 40, _MAX_DEPICT_PX)
     mol = None
     if q.get("id"):
-        m = SESSION.molecules.get(q["id"])
+        sid = _session_id(request)
+        m = SESSIONS.get(sid).molecules.get(q["id"]) if sid else None
         mol = m.mol if m else None
     elif q.get("chebi_id"):
         df = data_store.molecules()
         cid = str(q["chebi_id"])
         if cid in df.index:
             mol = df.loc[cid, "mol"]
-    elif q.get("smiles"):
-        mol = smiles_or_inchi_to_mol(q["smiles"])
     svg = render.mol_to_svg(mol, w, h)
+    # private: session-molecule URLs are per user, so shared proxy caches must not keep them.
     return Response(svg, media_type="image/svg+xml",
-                    headers={"Cache-Control": "public, max-age=3600"})
+                    headers={"Cache-Control": "private, max-age=3600"})
 
 
-async def explain(request: Request):
+@with_session
+async def explain(request: Request, s: Session):
     """Explain why the current rule classifies a session molecule as positive."""
     mid = request.query_params.get("id", "")
     # Snapshot the molecule + rule under the lock, then run the (slow) explanation
     # outside it so a concurrent reset/remove can't race the read.
-    with SESSION.lock:
-        m = SESSION.molecules.get(mid)
-        rule = SESSION.current_rule
+    with s.lock:
+        m = s.molecules.get(mid)
+        rule = s.current_rule
         smiles = m.smiles if m else None
         name = m.name if m else None
     if m is None:
@@ -188,9 +244,10 @@ async def explain(request: Request):
     return JSONResponse(data)
 
 
-async def api_state(request: Request):
-    with SESSION.lock:
-        return ok()  # ok() refreshes predictions when a rule exists
+@with_session
+async def api_state(request: Request, s: Session):
+    with s.lock:
+        return ok(s)  # ok() refreshes predictions when a rule exists
 
 
 def _class_aux_names(concept, rule) -> set[str]:
@@ -219,18 +276,21 @@ def _class_aux_names(concept, rule) -> set[str]:
     return names
 
 
-async def api_predicates(request: Request):
+@with_session
+async def api_predicates(request: Request, s: Session):
     """The building-block catalog for the visual rule editor. ``aux`` holds only the
     library predicates relevant to the session's class (the library keeps growing
     across classes), so it is computed fresh on each request."""
-    with SESSION.lock:
-        concept = {"name": SESSION.concept_name, "chebi_id": SESSION.concept_chebi_id,
-                   "definition": SESSION.concept_definition}
-        rule = SESSION.current_rule
+    with s.lock:
+        concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
+                   "definition": s.concept_definition}
+        rule = s.current_rule
     return JSONResponse({
         "catalog": predicates.catalog(),
         "aux": predicates.aux_blocks(config.LLM_LIBRARY_DIR,
-                                     names=_class_aux_names(concept, rule)),
+                                     names=_class_aux_names(concept, rule),
+                                     rule_descriptions=ilp.rule_aux_descriptions(rule),
+                                     rule=rule),
         "target": config.TARGET_LABEL,
     })
 
@@ -240,262 +300,359 @@ async def classes_search(request: Request):
     return JSONResponse({"results": data_store.search_classes(q)})
 
 
-async def session_from_class(request: Request):
+@with_session
+async def session_from_class(request: Request, s: Session):
     body = await request.json()
     chebi_id = str(body.get("chebi_id", "")).strip()
-    max_pos = _int(body.get("max_pos"), config.DEFAULT_MAX_POS)
-    max_neg = _int(body.get("max_neg"), config.DEFAULT_MAX_NEG)
+    max_pos = _int(body.get("max_pos"), config.DEFAULT_MAX_POS, 1, _MAX_CLASS_EXAMPLES)
+    max_neg = _int(body.get("max_neg"), config.DEFAULT_MAX_NEG, 1, _MAX_CLASS_EXAMPLES)
     if not chebi_id:
         return JSONResponse({"error": "No ChEBI id given."}, status_code=400)
-    with SESSION.lock:
+    with s.lock:
         pos_ids, neg_ids = data_store.gather_class_examples(chebi_id, max_pos, max_neg)
-        added_pos = sum(1 for cid in pos_ids if SESSION.add_from_chebi_id(cid, "pos"))
-        added_neg = sum(1 for cid in neg_ids if SESSION.add_from_chebi_id(cid, "neg"))
+        added_pos = sum(1 for cid in pos_ids if s.add_from_chebi_id(cid, "pos"))
+        added_neg = sum(1 for cid in neg_ids if s.add_from_chebi_id(cid, "neg"))
         # Record the class as the concept: its name + editable definition become
         # the LLM pipeline's textual input.
-        SESSION.set_concept(data_store.class_name(chebi_id), chebi_id,
+        s.set_concept(data_store.class_name(chebi_id), chebi_id,
                             data_store.class_definition(chebi_id))
-        return ok(message=f"Added {added_pos} positive and {added_neg} negative examples "
+        return ok(s, message=f"Added {added_pos} positive and {added_neg} negative examples "
                           f"from {data_store.class_name(chebi_id)}.")
 
 
-async def session_add(request: Request):
+@with_session
+async def session_add(request: Request, s: Session):
     body = await request.json()
-    text = body.get("text", "")
+    text = str(body.get("text", ""))
     label = body.get("label", "pos")
-    with SESSION.lock:
-        added, errors = SESSION.add_from_text(text, label)
+    if len(text.splitlines()) > _MAX_ADD_LINES:
+        return JSONResponse({"error": f"At most {_MAX_ADD_LINES} molecules per request."},
+                            status_code=400)
+    with s.lock:
+        added, errors = s.add_from_text(text, label)
         msg = f"Added {len(added)} molecule(s)."
         if errors:
             msg += f" Could not parse: {', '.join(errors[:5])}"
-        return ok(message=msg)
+        return ok(s, message=msg)
 
 
-async def session_set_label(request: Request):
+@with_session
+async def session_set_label(request: Request, s: Session):
     body = await request.json()
-    with SESSION.lock:
-        SESSION.set_label(str(body.get("id")), body.get("label"))
+    with s.lock:
+        s.set_label(str(body.get("id")), body.get("label"))
         # A prediction depends only on structure + rule, never on the label.
-        return ok(recompute=False)
+        return ok(s, recompute=False)
 
 
-async def session_remove(request: Request):
+@with_session
+async def session_remove(request: Request, s: Session):
     body = await request.json()
-    with SESSION.lock:
-        SESSION.remove(str(body.get("id")))
-        return ok(recompute=False)
+    with s.lock:
+        s.remove(str(body.get("id")))
+        return ok(s, recompute=False)
 
 
-async def session_reset(request: Request):
-    with SESSION.lock:
-        SESSION.clear()
-        return ok(message="Session cleared.")
+@with_session
+async def session_reset(request: Request, s: Session):
+    with s.lock:
+        s.clear()
+        return ok(s, message="Session cleared.")
 
 
-async def concept_definition(request: Request):
+@with_session
+async def session_export(request: Request, s: Session):
+    """The session's examples, concept definition and rule history as a JSON document."""
+    with s.lock:
+        return JSONResponse(s.to_export())
+
+
+@with_session
+async def session_import(request: Request, s: Session):
+    """Replace the session with an exported document (see ``Session.load_export``) and
+    score every imported rule against the imported examples."""
+    try:
+        doc = await request.json()
+    except Exception:
+        return JSONResponse({"error": "The file is not valid JSON."}, status_code=400)
+    with s.learn_lock:
+        if s.learn["running"]:
+            return JSONResponse({"error": "Wait for the running learn to finish first."},
+                                status_code=409)
+    with s.lock:
+        try:
+            skipped = s.load_export(doc, _MAX_IMPORT_MOLECULES, _MAX_IMPORT_RULES,
+                                    config.MAX_DEFINITION_CHARS)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        sig = s.labeled_signature()
+        invalid = 0
+        for e in s.rule_history:
+            e.confusion = _confusion_for_rule(s, e.rule)
+            e.signature = sig
+            invalid += e.confusion is None
+        msg = (f"Imported {len(s.molecules)} molecule(s) and "
+               f"{len(s.rule_history)} rule(s).")
+        if skipped:
+            msg += f" Could not load: {', '.join(skipped[:5])}" + (" …" if len(skipped) > 5 else "")
+        if invalid:
+            msg += f" {invalid} rule(s) could not be evaluated."
+        return ok(s, message=msg)
+
+
+@with_session
+async def llm_conversation(request: Request, s: Session):
+    """A Markdown transcript of the session's LLM prompts and the model's answers."""
+    with s.lock:
+        runs = list(s.llm_runs)
+    if not runs:
+        return JSONResponse({"error": "No LLM prompts in this session yet."}, status_code=404)
+    return JSONResponse({"markdown": llm_guard.conversation_markdown(runs)})
+
+
+@with_session
+async def concept_definition(request: Request, s: Session):
     """Update the editable concept definition passed to the LLM pipeline."""
     body = await request.json()
-    with SESSION.lock:
-        SESSION.concept_definition = (body.get("definition") or "")
-        return ok()
+    definition = body.get("definition") or ""
+    if len(definition) > config.MAX_DEFINITION_CHARS:
+        return JSONResponse(
+            {"error": f"The definition is too long ({len(definition)} characters, limit "
+                      f"{config.MAX_DEFINITION_CHARS})."}, status_code=400)
+    with s.lock:
+        s.concept_definition = definition
+        return ok(s)
 
 
-async def suggest(request: Request):
+@with_session
+async def suggest(request: Request, s: Session):
     body = await request.json()
-    n = _int(body.get("n"), 10)
-    with SESSION.lock:
-        positives = SESSION.positives()
+    n = _int(body.get("n"), 10, 1, _MAX_SUGGEST)
+    with s.lock:
+        positives = s.positives()
         if not positives:
             return JSONResponse({"error": "Add at least one positive example first."},
                                 status_code=400)
-        exclude_ids = {m.chebi_id for m in SESSION.molecules.values() if m.chebi_id}
-        exclude_smiles = {m.smiles for m in SESSION.molecules.values()}
+        exclude_ids = {m.chebi_id for m in s.molecules.values() if m.chebi_id}
+        exclude_smiles = {m.smiles for m in s.molecules.values()}
         candidates = similarity.suggest(positives, exclude_ids, exclude_smiles, n=n)
         # If a rule exists, attach its prediction for each candidate.
-        if SESSION.current_rule and candidates:
-            from chebi_utils.read_molecule import smiles_or_inchi_to_mol
-
-            class _Tmp:
-                def __init__(self, cid, mol):
-                    self.id = cid
-                    self.mol = mol
-
-            tmp = []
+        if s.current_rule and candidates:
+            df = data_store.molecules()
+            preds = ilp.classify(s.current_rule, [
+                types.SimpleNamespace(id=c["chebi_id"], mol=df.loc[c["chebi_id"], "mol"])
+                for c in candidates])
             for c in candidates:
-                mol = smiles_or_inchi_to_mol(c["smiles"])
-                if mol is not None:
-                    tmp.append(_Tmp(c["chebi_id"], mol))
-            if tmp:
-                preds = ilp.classify(SESSION.current_rule, tmp)
-                for c in candidates:
-                    c["prediction"] = preds.get(c["chebi_id"])
+                c["prediction"] = preds.get(c["chebi_id"])
         return JSONResponse({"candidates": candidates})
 
 
-async def suggest_accept(request: Request):
+@with_session
+async def suggest_accept(request: Request, s: Session):
     body = await request.json()
     chebi_id = body.get("chebi_id")
     smiles = body.get("smiles")
     label = body.get("label", "pos")
-    with SESSION.lock:
+    with s.lock:
         if chebi_id:
-            SESSION.add_from_chebi_id(str(chebi_id), label)
+            s.add_from_chebi_id(str(chebi_id), label)
         elif smiles:
-            SESSION.add_from_text(smiles, label)
-        return ok()
+            s.add_from_text(smiles, label)
+        return ok(s)
 
 
-# Live-learning state, updated by the background learner thread and polled by the UI.
-LEARN_LOCK = threading.Lock()
-LEARN = {"running": False, "done": False, "error": None, "lines": [],
-         "message": None, "score": None, "method": config.DEFAULT_LEARN_METHOD}
 
 # How each method is named in the UI's live-output panel and status messages.
-_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": f"LLM ({config.LLM_MODEL})"}
+_METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": f"LLM ({config.LLM_MODEL_NAME})"}
+
+# Server-wide cap on simultaneous learning runs (each Popper / Aleph run is a CPU-bound
+# subprocess), so many concurrent users can't overload the host.
+_LEARN_SLOTS = threading.BoundedSemaphore(config.MAX_CONCURRENT_LEARNS)
 
 
-def _learn_worker(pos, neg, timeout, method, model, concept):
+def _learn_worker(s, pos, neg, timeout, method, concept, log_fields, use_cache=True):
     def on_line(line):
-        with LEARN_LOCK:
-            LEARN["lines"].append(line)
+        with s.learn_lock:
+            s.learn["lines"].append(line)
 
+    # The model calls of this run, kept on the session for the conversation download.
+    llm_run = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "concept": concept.get("name"),
+               "model": config.LLM_MODEL_NAME, "n_pos": len(pos), "n_neg": len(neg),
+               "exchanges": []}
     try:
-        result = ilp.learn_dispatch(method, pos, neg, timeout, on_line,
-                                    model=model, concept=concept)
+        with llm_guard.context(**log_fields), llm_guard.recording(llm_run["exchanges"]):
+            result = ilp.learn_dispatch(method, pos, neg, timeout, on_line,
+                                        model=config.LLM_MODEL, concept=concept,
+                                        admit=lambda: llm_guard.admit(s),
+                                        use_cache=use_cache)
     except Exception as e:
         traceback.print_exc()
-        with LEARN_LOCK:
-            LEARN.update(running=False, done=True, error=str(e))
+        if llm_run["exchanges"]:
+            llm_run["outcome"] = f"failed: {e}"
+            with s.lock:
+                s.add_llm_run(llm_run)
+        with s.learn_lock:
+            s.learn.update(running=False, done=True, error=str(e))
         return
+    finally:
+        _LEARN_SLOTS.release()
 
     rule = result.get("rule")
-    with SESSION.lock:
+    with s.lock:
+        if llm_run["exchanges"]:
+            llm_run["rule"] = rule
+            llm_run["outcome"] = ("rule learned" if rule else
+                                  result.get("error") or "no rule found")
+            s.add_llm_run(llm_run)
         if rule:
-            entry = SESSION.add_rule(method, rule)
+            # Name the model that wrote an LLM rule (a cached library rule was written
+            # earlier, possibly by another model).
+            model = None
+            if method == "llm":
+                model = "cached" if result.get("cached") else config.LLM_MODEL_NAME
+            entry = s.add_rule(method, rule, model=model)
             try:
-                entry.confusion = _confusion(recompute_predictions())
+                entry.confusion = _confusion(s, recompute_predictions(s))
             except ilp.RuleError:
                 pass
-    with LEARN_LOCK:
-        LEARN.update(
+    with s.learn_lock:
+        s.learn.update(
             running=False, done=True, score=result.get("score"),
-            message=("Learned a rule." if rule else
+            cached=bool(rule and result.get("cached")),
+            message=("Loaded the cached LLM rule from the rule library." if rule and
+                     result.get("cached") else
+                     "Learned a rule." if rule else
                      result.get("error") or
                      "No rule found within the time limit "
                      "(try more/cleaner examples or a longer timeout)."),
         )
 
 
-async def learn(request: Request):
+@with_session
+async def learn(request: Request, s: Session):
     try:
         body = await request.json()
     except Exception:
         body = {}
-    timeout = _int(body.get("timeout"), config.DEFAULT_TIMEOUT)
+    timeout = _int(body.get("timeout"), config.DEFAULT_TIMEOUT, 1, config.MAX_TIMEOUT)
     method = str(body.get("method") or config.DEFAULT_LEARN_METHOD).lower()
     if method not in config.LEARN_METHODS:
         return JSONResponse({"error": f"Unknown method '{method}'."}, status_code=400)
-    model = body.get("model") or config.LLM_MODEL
+    # "Prompt the LLM": bypass the rule library's cached rule for the class.
+    use_cache = not body.get("fresh")
+    # The model is server-configured only (never taken from the request), so a client
+    # can't switch the demo's budget to a pricier model.
+    log_fields = {"session": _session_id(request),
+                  "client": request.client.host if request.client else None,
+                  "user_agent": request.headers.get("user-agent"), "invited": s.invited}
 
-    with LEARN_LOCK:
-        if LEARN["running"]:
-            return JSONResponse({"error": "Already learning."}, status_code=409)
-        LEARN.update(running=True, done=False, error=None, lines=[], message=None,
-                     score=None, method=method)
-
-    with SESSION.lock:
-        pos = SESSION.positives()
-        neg = [m for m in SESSION.molecules.values() if m.label == "neg"]
-        concept = {"name": SESSION.concept_name, "chebi_id": SESSION.concept_chebi_id,
-                   "definition": SESSION.concept_definition}
-
+    with s.lock:
+        pos = s.positives()
+        neg = [m for m in s.molecules.values() if m.label == "neg"]
+        concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
+                   "definition": s.concept_definition}
     if not pos or not neg:
-        with LEARN_LOCK:
-            LEARN.update(running=False, done=True,
-                         error="Need at least one positive and one negative example.")
         return JSONResponse(
             {"error": "Need at least one positive and one negative example."}, status_code=400)
 
-    threading.Thread(target=_learn_worker, args=(pos, neg, timeout, method, model, concept),
+    with s.learn_lock:
+        if s.learn["running"]:
+            return JSONResponse({"error": "Already learning."}, status_code=409)
+        if not _LEARN_SLOTS.acquire(blocking=False):
+            return JSONResponse({"error": "The server is busy with other learning runs. "
+                                          "Please try again in a minute."}, status_code=503)
+        s.learn.update(running=True, done=False, error=None, lines=[], message=None,
+                       score=None, method=method, cached=False)
+
+    threading.Thread(target=_learn_worker,
+                     args=(s, pos, neg, timeout, method, concept, log_fields, use_cache),
                      daemon=True).start()
     return JSONResponse({"started": True})
 
 
-async def learn_progress(request: Request):
+@with_session
+async def learn_progress(request: Request, s: Session):
     """Poll Popper's live output; when done, includes the final session state."""
-    with LEARN_LOCK:
-        lines = list(LEARN["lines"])
-        running, done, error = LEARN["running"], LEARN["done"], LEARN["error"]
-        message, score, method = LEARN["message"], LEARN["score"], LEARN["method"]
+    with s.learn_lock:
+        lines = list(s.learn["lines"])
+        running, done, error = s.learn["running"], s.learn["done"], s.learn["error"]
+        message, score, method = s.learn["message"], s.learn["score"], s.learn["method"]
+        cached = s.learn.get("cached", False)
     resp = {
         "running": running, "done": done, "error": error, "message": message,
         "score": score, "method": method, "method_label": _METHOD_LABELS.get(method, method),
+        "cached": cached,
         "tail": lines[-6:], "log": "\n".join(lines), "total_lines": len(lines),
     }
     if done and not error:
-        resp["state"] = state_dict()
+        resp["state"] = state_dict(s)
     return JSONResponse(resp)
 
 
-async def rule_edit(request: Request):
+@with_session
+async def rule_edit(request: Request, s: Session):
     body = await request.json()
     new_rule = (body.get("rule") or "").strip()
     # A rule that uses a generated (aux_*) predicate carries only the literal; pull in
     # the predicate's definition from the library so it is self-contained and clingo
     # can actually derive it (otherwise it classifies everything negative).
     new_rule = ilp.expand_aux_definitions(new_rule)
-    with SESSION.lock:
+    with s.lock:
         if not ilp.rule_targets_ok(new_rule):
             return JSONResponse(
                 {"error": f"Rule must define the target predicate "
                           f"'{config.TARGET_LABEL}(...) :- ...'."}, status_code=400)
-        old_preds = dict(SESSION.last_predictions)
+        old_preds = dict(s.last_predictions)
         # Validate/classify before touching state so a bad edit doesn't disturb
         # the selected rule.
         try:
-            new_preds = ilp.classify(new_rule, list(SESSION.molecules.values()))
+            new_preds = ilp.classify(new_rule, list(s.molecules.values()))
         except ilp.RuleError as e:
             return JSONResponse({"error": f"Invalid rule: {e}"}, status_code=400)
-        selected = SESSION.selected_entry()
+        selected = s.selected_entry()
         # Only record a new history entry when the applied rule actually differs
         # from the currently selected one.
         if selected is None or new_rule != selected.rule:
-            SESSION.add_rule("edited", new_rule, confusion=_confusion(new_preds))
-        SESSION.last_predictions = new_preds
+            s.add_rule("edited", new_rule, confusion=_confusion(s, new_preds))
+        s.last_predictions = new_preds
         changed = []
-        for m in SESSION.molecules.values():
+        for m in s.molecules.values():
             o, n = old_preds.get(m.id), new_preds.get(m.id)
             if o is not None and o != n:
                 changed.append({"id": m.id, "name": m.name, "label": m.label,
                                 "from": o, "to": n})
-        return ok(message=f"Rule updated. {len(changed)} classification(s) changed.",
+        return ok(s, message=f"Rule updated. {len(changed)} classification(s) changed.",
                   changed=changed)
 
 
-async def rule_select(request: Request):
+@with_session
+async def rule_select(request: Request, s: Session):
     """Make an existing history entry the currently selected (editable) rule."""
     body = await request.json()
-    with SESSION.lock:
-        if not SESSION.select_rule(str(body.get("id"))):
+    with s.lock:
+        if not s.select_rule(str(body.get("id"))):
             return JSONResponse({"error": "Unknown rule."}, status_code=404)
-        return ok()
+        return ok(s)
 
 
-async def rules_reevaluate(request: Request):
+@with_session
+async def rules_reevaluate(request: Request, s: Session):
     """Re-score every rule in the history against the current example set,
     refreshing each stored confusion matrix and clearing the stale flags."""
-    with SESSION.lock:
-        sig = SESSION.labeled_signature()
-        for e in SESSION.rule_history:
-            conf = _confusion_for_rule(e.rule)
+    with s.lock:
+        sig = s.labeled_signature()
+        for e in s.rule_history:
+            conf = _confusion_for_rule(s, e.rule)
             if conf is not None:
                 e.confusion = conf
                 e.signature = sig
-        return ok(message=f"Re-evaluated {len(SESSION.rule_history)} rule(s).")
+        return ok(s, message=f"Re-evaluated {len(s.rule_history)} rule(s).")
 
 
 routes = [
     Route("/", index),
+    Route("/tutorial", tutorial),
+    Route("/about", about),
     Route("/api/depict", depict),
     Route("/api/explain", explain),
     Route("/api/state", api_state),
@@ -506,6 +663,9 @@ routes = [
     Route("/api/session/set_label", session_set_label, methods=["POST"]),
     Route("/api/session/remove", session_remove, methods=["POST"]),
     Route("/api/session/reset", session_reset, methods=["POST"]),
+    Route("/api/session/export", session_export),
+    Route("/api/session/import", session_import, methods=["POST"]),
+    Route("/api/llm/conversation", llm_conversation),
     Route("/api/concept/definition", concept_definition, methods=["POST"]),
     Route("/api/suggest", suggest, methods=["POST"]),
     Route("/api/suggest/accept", suggest_accept, methods=["POST"]),
@@ -523,8 +683,8 @@ async def _lifespan(app):
         print(
             "\n[ICaRuS] WARNING — required data file(s) not found:\n"
             + "\n".join(missing)
-            + "\n  Set ICARUS_CHEBILP_DIR to the chebILP checkout that holds them "
-            "(see README → Running on another system).\n",
+            + "\n  Place them under this project's data/ directory, or set "
+            "ICARUS_DATA_DIR (see README → Running on another system).\n",
             flush=True,
         )
     else:

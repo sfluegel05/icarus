@@ -5,7 +5,9 @@ Everything here is read-only reference data shared across sessions.
 """
 
 import functools
+import html
 import pickle
+import re
 
 import networkx as nx
 import pandas as pd
@@ -61,11 +63,36 @@ def class_name(chebi_id: str) -> str:
     return f"CHEBI:{chebi_id}"
 
 
+_SUP = str.maketrans("0123456789+-−()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁻⁽⁾ⁿ")
+_SUB = str.maketrans("0123456789+-−()n", "₀₁₂₃₄₅₆₇₈₉₊₋₋₍₎ₙ")
+_TAG = re.compile(r"<[^>]*>")
+
+
+def _script(m: re.Match, table: dict) -> str:
+    """Render a ``<sup>``/``<sub>`` body as Unicode super/subscripts when every
+    character has one; otherwise keep it as plain text."""
+    text = _TAG.sub("", m.group(1))
+    mapped = text.translate(table)
+    return mapped if all(a != b or a.isspace() for a, b in zip(text, mapped)) else text
+
+
+def plain_definition(text: str | None) -> str | None:
+    """ChEBI definitions carry inline HTML (``<i>``, ``<sub>``, ``<sup>``, entities,
+    sometimes mis-nested). Turn one into plain text for the editable concept box and
+    the LLM prompt: sub/superscripts become Unicode where possible, other tags go."""
+    if not text:
+        return text
+    text = re.sub(r"<sup>(.*?)</sup>", lambda m: _script(m, _SUP), text, flags=re.I | re.S)
+    text = re.sub(r"<sub>(.*?)</sub>", lambda m: _script(m, _SUB), text, flags=re.I | re.S)
+    text = html.unescape(_TAG.sub("", text))
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def class_definition(chebi_id: str) -> str | None:
-    """The ChEBI textual definition of a class, or ``None`` if it has none."""
+    """The ChEBI textual definition of a class as plain text, or ``None`` if it has none."""
     g = graph()
     if chebi_id in g.nodes:
-        return g.nodes[chebi_id].get("definition")
+        return plain_definition(g.nodes[chebi_id].get("definition"))
     return None
 
 

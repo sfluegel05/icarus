@@ -5,14 +5,65 @@ let selectedClass = null;
 let lastState = null;
 let molById = {};
 
+// Each tab has its own server-side session, keyed by a random id kept in
+// sessionStorage (so it survives a reload but is not shared with other tabs).
+// crypto.getRandomValues, unlike randomUUID, also works over plain http.
+const SID_KEY = "icarus-session-id";
+const newSid = () =>
+  Array.from(crypto.getRandomValues(new Uint8Array(16)),
+             (b) => b.toString(16).padStart(2, "0")).join("");
+let SID = sessionStorage.getItem(SID_KEY) || newSid();
+sessionStorage.setItem(SID_KEY, SID);
+
+// A duplicated tab inherits sessionStorage, and with it the id. Ask the other open
+// tabs whether one already uses this id; if so, start a fresh session instead.
+const sidReady = new Promise((resolve) => {
+  if (!("BroadcastChannel" in window)) return resolve();
+  const ch = new BroadcastChannel("icarus-sessions");
+  let probing = true;
+  ch.onmessage = (e) => {
+    const { type, sid } = e.data || {};
+    if (sid !== SID) return;
+    if (type === "probe" && !probing) ch.postMessage({ type: "taken", sid });
+    else if (type === "taken" && probing) {
+      SID = newSid();
+      sessionStorage.setItem(SID_KEY, SID);
+    }
+  };
+  ch.postMessage({ type: "probe", sid: SID });
+  setTimeout(() => { probing = false; resolve(); }, 150);
+});
+
+// Invite code: opening the demo as `?invite=<code>` lifts the public LLM limits.
+// It is kept in localStorage (so it applies to every tab and later visits) and
+// dropped from the address bar so it isn't passed on by copying the URL.
+const INVITE_KEY = "icarus-invite";
+const urlInvite = new URLSearchParams(location.search).get("invite");
+if (urlInvite !== null) {
+  if (urlInvite) localStorage.setItem(INVITE_KEY, urlInvite);
+  else localStorage.removeItem(INVITE_KEY);
+  const url = new URL(location.href);
+  url.searchParams.delete("invite");
+  history.replaceState(null, "", url);
+}
+let INVITE = localStorage.getItem(INVITE_KEY);
+
+function apiHeaders() {
+  const h = { "X-Session-Id": SID };
+  if (INVITE) h["X-Invite-Code"] = INVITE;
+  return h;
+}
+
 async function api(path, body) {
-  const opts = { method: body === undefined ? "GET" : "POST" };
+  await sidReady;
+  const opts = { method: body === undefined ? "GET" : "POST", headers: apiHeaders() };
   if (body !== undefined) {
-    opts.headers = { "Content-Type": "application/json" };
+    opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
-  const data = await res.json();
+  // A proxy error page (502/504) is HTML, not JSON.
+  const data = await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }));
   if (!res.ok) {
     toast(data.error || "Request failed");
     throw new Error(data.error || res.statusText);
@@ -27,7 +78,8 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.remove("hidden");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add("hidden"), 4000);
+  // Long messages (e.g. an LLM limit notice) stay up long enough to be read.
+  toastTimer = setTimeout(() => t.classList.add("hidden"), Math.max(4000, msg.length * 60));
 }
 
 function escapeHtml(s) {
@@ -61,7 +113,7 @@ function hashStr(s) {
   return (h >>> 0).toString(36);
 }
 const depictUrl = (m, w, h) =>
-  `/api/depict?id=${encodeURIComponent(m.id)}&w=${w}&h=${h}&v=${hashStr(m.smiles || m.id)}`;
+  `api/depict?id=${encodeURIComponent(m.id)}&sid=${SID}&w=${w}&h=${h}&v=${hashStr(m.smiles || m.id)}`;
 
 // ── rendering ────────────────────────────────────────────────────────────
 function render(state) {
@@ -71,7 +123,20 @@ function render(state) {
   const pos = state.molecules.filter((m) => m.label === "pos");
   const neg = state.molecules.filter((m) => m.label === "neg");
 
-  renderLlmModel(state.llm_model);
+  renderLlmModel(state.llm_model, state.llm_quota);
+  $("llm-conv-btn").classList.toggle("hidden", !state.llm_runs);
+  if (INVITE && state.llm_quota && !state.llm_quota.invited) {
+    localStorage.removeItem(INVITE_KEY);
+    INVITE = null;
+    toast("This invite code is not valid; the public LLM limits apply.");
+  }
+  if (state.max_definition_chars) $("concept-def").maxLength = state.max_definition_chars;
+  // Seed the timeout field from the server default once, so later renders don't
+  // overwrite what the user typed.
+  if (state.default_timeout && !$("timeout").dataset.seeded) {
+    $("timeout").value = state.default_timeout;
+    $("timeout").dataset.seeded = "1";
+  }
   $("pos-count").textContent = pos.length;
   $("neg-count").textContent = neg.length;
   $("counts").textContent =
@@ -166,7 +231,7 @@ function renderHistory(state) {
   historyMeta = { count: hist.length, anyStale: hist.some((h) => h.stale) };
   list.innerHTML = hist.map((h) => {
     const selected = h.id === state.selected_rule_id;
-    const label = ORIGIN_LABELS[h.origin] || h.origin;
+    const label = escapeHtml((ORIGIN_LABELS[h.origin] || h.origin) + (h.model ? ` (${h.model})` : ""));
     const conf = h.confusion
       ? confSummary(h.confusion) +
         (h.stale ? `<span class="rh-stale">⚠ examples changed since — re-evaluate</span>` : "")
@@ -204,7 +269,7 @@ function renderConcept(concept) {
 // Persist an edited definition when the user leaves the box.
 $("concept-def").addEventListener("change", async () => {
   try {
-    await api("/api/concept/definition", { definition: $("concept-def").value });
+    await api("api/concept/definition", { definition: $("concept-def").value });
     loadPredicates();  // retrieval of generated predicates runs against the definition
   } catch (e) { /* toast already shown */ }
 });
@@ -392,7 +457,7 @@ async function openExplain(id, name) {
   $("explain-content").innerHTML = `<div class="muted">Building explanation…</div>`;
   $("explain-modal").classList.remove("hidden");
   try {
-    const data = await api(`/api/explain?id=${encodeURIComponent(id)}`);
+    const data = await api(`api/explain?id=${encodeURIComponent(id)}`);
     $("explain-content").innerHTML = `
       <div class="explain-struct"><img src="${data.image}" alt=""></div>
       <div class="explain-text">${escapeHtml(data.text)}</div>`;
@@ -414,7 +479,7 @@ $("class-search").addEventListener("input", (e) => {
   clearTimeout(acTimer);
   if (q.length < 2) { $("class-results").classList.add("hidden"); return; }
   acTimer = setTimeout(async () => {
-    const data = await api(`/api/classes/search?q=${encodeURIComponent(q)}`);
+    const data = await api(`api/classes/search?q=${encodeURIComponent(q)}`);
     const box = $("class-results");
     box.innerHTML = "";
     data.results.forEach((r) => {
@@ -439,13 +504,22 @@ document.addEventListener("click", (e) => {
 
 $("fill-btn").onclick = async () => {
   if (!selectedClass) return;
-  const data = await api("/api/session/from_class", {
-    chebi_id: selectedClass.id,
-    max_pos: parseInt($("max-pos").value),
-    max_neg: parseInt($("max-neg").value),
-  });
-  // The generated predicates offered as blocks depend on the class.
-  loadPredicates().finally(() => { render(data); toast(data.message); });
+  const btn = $("fill-btn");
+  btn.textContent = "Searching…";
+  btn.disabled = true;
+  try {
+    const data = await api("api/session/from_class", {
+      chebi_id: selectedClass.id,
+      max_pos: parseInt($("max-pos").value),
+      max_neg: parseInt($("max-neg").value),
+    });
+    // The generated predicates offered as blocks depend on the class.
+    await loadPredicates().finally(() => { render(data); toast(data.message); });
+  } finally {
+    btn.textContent = "Fill examples";
+    // Typing in the search box clears the selection while we were waiting.
+    btn.disabled = !selectedClass;
+  }
 };
 
 // ── add molecules via SMILES/InChI ─────────────────────────────────────────
@@ -455,7 +529,7 @@ document.querySelectorAll(".add-mol").forEach((btn) => {
     const input = $(label === "pos" ? "pos-input" : "neg-input");
     const text = input.value.trim();
     if (!text) return;
-    const data = await api("/api/session/add", { text, label });
+    const data = await api("api/session/add", { text, label });
     input.value = "";
     render(data); toast(data.message);
   };
@@ -505,19 +579,19 @@ async function mutateMolecule(path, body, applyLocal) {
     if (seq === mutationSeq) render(data);
   } catch (e) {
     // The backend rejected it — resync to its truth (toast already shown).
-    if (seq === mutationSeq) api("/api/state").then(render).catch(() => {});
+    if (seq === mutationSeq) api("api/state").then(render).catch(() => {});
   }
 }
 
 function setLabel(id, label) {
-  return mutateMolecule("/api/session/set_label", { id, label }, (s) => {
+  return mutateMolecule("api/session/set_label", { id, label }, (s) => {
     const m = s.molecules.find((x) => x.id === id);
     if (m) m.label = label;
   });
 }
 
 function removeMolecule(id) {
-  return mutateMolecule("/api/session/remove", { id }, (s) => {
+  return mutateMolecule("api/session/remove", { id }, (s) => {
     s.molecules = s.molecules.filter((x) => x.id !== id);
   });
 }
@@ -579,7 +653,7 @@ $("suggest-btn").onclick = async () => {
   $("suggest-btn").disabled = true;
   $("tinder-empty").textContent = "";
   try {
-    const data = await api("/api/suggest", { n: parseInt($("suggest-n").value) });
+    const data = await api("api/suggest", { n: parseInt($("suggest-n").value) });
     queue = data.candidates || [];
     qIdx = 0;
     showCurrent();
@@ -604,7 +678,7 @@ function showCurrent() {
   t.classList.remove("hidden");
   $("suggest-progress").textContent = `${qIdx + 1} / ${queue.length}`;
   $("t-sim").textContent = c.similarity;
-  $("t-struct").innerHTML = `<img src="/api/depict?chebi_id=${c.chebi_id}&w=320&h=250" alt="">`;
+  $("t-struct").innerHTML = `<img src="api/depict?chebi_id=${c.chebi_id}&w=320&h=250" alt="">`;
   $("t-name").textContent = c.name;
   $("t-id").innerHTML = chebiLink(c.chebi_id);
   $("t-def").innerHTML = sanitizeChebiHtml(c.definition || "");
@@ -617,9 +691,7 @@ function showCurrent() {
 async function decide(label) {
   const c = queue[qIdx];
   if (label) {
-    await api("/api/suggest/accept", { chebi_id: c.chebi_id, label });
-    const state = await api("/api/state");
-    render(state);
+    render(await api("api/suggest/accept", { chebi_id: c.chebi_id, label }));
   }
   qIdx++;
   showCurrent();
@@ -705,25 +777,33 @@ let learnPoll = null;
 
 const METHOD_LABELS = { popper: "Popper", aleph: "Aleph", llm: "LLM" };
 
-// Name the configured model in the method selector (and live-output title).
-function renderLlmModel(model) {
+// Name the configured model in the method selector (and live-output title), with
+// the session's remaining LLM prompts when the server sets a per-session limit.
+function renderLlmModel(model, quota) {
   if (!model) return;
   const label = `LLM (${model})`;
+  const left = quota && quota.limit ? ` — ${Math.max(0, quota.limit - quota.used)} prompts left` : "";
   const opt = document.querySelector('#learn-method option[value="llm"]');
-  if (opt) opt.textContent = label;
+  if (opt) opt.textContent = label + left;
   METHOD_LABELS.llm = label;
 }
 
-// The timeout only bounds the ILP searches; the LLM call is bounded by the CLI.
+// The timeout field only bounds the ILP searches; the LLM has its own server-side limit.
 $("learn-method").addEventListener("change", () => {
   $("timeout-wrap").style.display =
     $("learn-method").value === "llm" ? "none" : "";
+  if ($("learn-method").value !== "llm") $("llm-fresh-btn").classList.add("hidden");
 });
 
-$("learn-btn").onclick = async () => {
-  const method = $("learn-method").value;
+$("learn-btn").onclick = () => startLearn(false);
+// Shown after the LLM method served a cached library rule: really prompt the model.
+$("llm-fresh-btn").onclick = () => startLearn(true);
+
+async function startLearn(fresh) {
+  const method = fresh ? "llm" : $("learn-method").value;
   const label = METHOD_LABELS[method] || method;
   $("learn-btn").disabled = true;
+  $("llm-fresh-btn").classList.add("hidden");
   $("learn-status").textContent = `Running ${label}…`;
   $("learn-progress").classList.remove("hidden");
   document.querySelector(".lp-title").textContent = `${label} output`;
@@ -731,7 +811,7 @@ $("learn-btn").onclick = async () => {
   $("learn-full").textContent = "";
   revealEnd($("learn-progress"));
   try {
-    await api("/api/learn", { method, timeout: parseInt($("timeout").value) });
+    await api("api/learn", { method, timeout: parseInt($("timeout").value), fresh });
   } catch (err) {
     $("learn-status").textContent = "";
     $("learn-btn").disabled = false;
@@ -739,7 +819,7 @@ $("learn-btn").onclick = async () => {
   }
   const run = learnPoll = {};
   setTimeout(() => pollLearn(run), 500);
-};
+}
 
 // One poll in flight at a time (next one scheduled only after this reply), tied to
 // its run. A fixed setInterval let several slow replies overlap; each saw `done`
@@ -748,7 +828,10 @@ async function pollLearn(run) {
   if (run !== learnPoll) return;
   let p;
   try {
-    p = await fetch("/api/learn/progress").then((r) => r.json());
+    const r = await fetch("api/learn/progress", { headers: apiHeaders() });
+    // An HTTP error won't fix itself by polling again; a network blip might.
+    p = r.ok ? await r.json()
+      : { done: true, error: `Lost track of the learning run (${r.status} ${r.statusText}).` };
   } catch (e) {
     if (run === learnPoll) setTimeout(() => pollLearn(run), 500);
     return;
@@ -765,10 +848,13 @@ async function pollLearn(run) {
     learnPoll = null;
     $("learn-btn").disabled = false;
     $("learn-status").textContent = "";
+    // Keep it available after every LLM run (cached or fresh) so the user can
+    // request further fresh rules without going back through the cached result.
+    $("llm-fresh-btn").classList.toggle("hidden", p.method !== "llm");
     if (p.error) {
       toast(p.error);
     } else {
-      // A learn may have written new aux predicates (LLM) — refresh the palette,
+      // The learned rule may define new aux predicates (LLM) — refresh the palette,
       // then render so the returned rule loads with those blocks available.
       loadPredicates().finally(() => {
         render(p.state);
@@ -811,7 +897,7 @@ $("toggle-log").onclick = () => {
 $("apply-rule-btn").onclick = async () => {
   const rule = assembledRule();
   try {
-    const data = await api("/api/rule/edit", { rule });
+    const data = await api("api/rule/edit", { rule });
     editorDirty = false;
     // The applied rule becomes a new selected entry; force the editor to reload it.
     lastRuleSig = null;
@@ -848,14 +934,14 @@ $("rule-history-list").addEventListener("click", async (e) => {
   if (!item) return;
   const id = item.dataset.id;
   if (lastState && id === lastState.selected_rule_id) return;
-  const data = await api("/api/rule/select", { id });
+  const data = await api("api/rule/select", { id });
   render(data);
   $("change-area").innerHTML = "";
 });
 
 // Re-score every history rule against the current examples (clears stale flags).
 $("reeval-btn").onclick = async () => {
-  const data = await api("/api/rules/reevaluate", {});
+  const data = await api("api/rules/reevaluate", {});
   render(data);
   toast(data.message);
 };
@@ -872,18 +958,67 @@ function renderChanges(changed) {
     `<div class="report-box"><h4>${changed.length} classification(s) changed by your edit</h4>${rows}</div>`;
 }
 
-// ── reset ────────────────────────────────────────────────────────────────────
-$("reset-btn").onclick = async () => {
-  const data = await api("/api/session/reset", {});
+// ── reset / export / import ────────────────────────────────────────────────
+// Render a state that replaced the whole session (reset or import).
+function renderReplaced(data) {
+  lastRuleSig = null;  // rule ids restart, so force the editor to reload
   render(data);
-  loadPredicates();  // no class any more → no class-specific generated predicates
+  loadPredicates();  // the class (and its generated predicates) may have changed
   queue = []; qIdx = 0;
   $("tinder").classList.add("hidden");
   $("tinder-empty").textContent = "";
   $("change-area").innerHTML = "";
   $("class-search").value = "";
   $("selected-class").textContent = "";
+}
+
+$("reset-btn").onclick = async () => {
+  renderReplaced(await api("api/session/reset", {}));
   toast("Session cleared.");
+};
+
+function download(text, filename, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
+
+// "carboxylic acid" → "icarus-carboxylic-acid-2026-10-15"
+function fileStem(kind) {
+  const name = (lastState?.concept?.name || "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  return ["icarus", kind, name, new Date().toISOString().slice(0, 10)]
+    .filter(Boolean).join("-");
+}
+
+$("export-btn").onclick = async () => {
+  const data = await api("api/session/export");
+  download(JSON.stringify(data, null, 2) + "\n", `${fileStem("")}.json`, "application/json");
+};
+
+$("import-btn").onclick = () => $("import-file").click();
+$("import-file").onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";  // so picking the same file again still fires
+  if (!file) return;
+  let doc;
+  try {
+    doc = JSON.parse(await file.text());
+  } catch {
+    return toast("That file is not valid JSON.");
+  }
+  if (lastState?.molecules.length &&
+      !confirm("Importing replaces the examples, definition and rules of this session. Continue?")) return;
+  const data = await api("api/session/import", doc);
+  renderReplaced(data);
+  toast(data.message);
+};
+
+$("llm-conv-btn").onclick = async () => {
+  const data = await api("api/llm/conversation");
+  download(data.markdown, `${fileStem("llm")}.md`, "text/markdown");
 };
 
 document.addEventListener("keydown", (e) => {
@@ -905,15 +1040,13 @@ Blocks.init({
   },
 });
 
-let catalogLoaded = false;
 async function loadPredicates() {
   try {
-    const data = await api("/api/predicates");
+    const data = await api("api/predicates");
     Blocks.setCatalog(data.catalog, data.aux, data.target);
-    catalogLoaded = true;
   } catch (e) { /* toast already shown */ }
 }
 
 // initial load
 loadPredicates();
-api("/api/state").then(render);
+api("api/state").then(render);

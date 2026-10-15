@@ -345,9 +345,12 @@ def _aux_head_arity(program_path: str) -> int | None:
     return 0 if not args else len([a for a in args.split(",") if a.strip()])
 
 
-def aux_blocks(library_dir: str, names=None) -> list[dict]:
+def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) -> list[dict]:
     """Blocks for the LLM-generated ``aux_*`` predicates in the session library,
-    restricted to ``names`` when given (``None`` = the whole library).
+    restricted to ``names`` when given (``None`` = the whole library), plus those the
+    current ``rule`` defines itself (``rule_descriptions``: name → description from
+    its headers) — predicates a fresh LLM run generated are not in the read-only
+    library.
 
     Names + descriptions come from ``rule_to_nl.load_aux_descriptions``; the arity
     (parsed from each program head) decides the scope — arity 1 is treated as a
@@ -355,8 +358,6 @@ def aux_blocks(library_dir: str, names=None) -> list[dict]:
     default: the Prolog→block parser places an aux usage by its actual argument
     role, so a rule always round-trips regardless of this hint.
     """
-    if not library_dir or not os.path.isdir(library_dir):
-        return []
     try:
         from chebILP.explainability.rule_to_nl import (
             load_aux_descriptions, _format_aux_name,
@@ -364,27 +365,36 @@ def aux_blocks(library_dir: str, names=None) -> list[dict]:
     except Exception:
         return []
 
-    descriptions = load_aux_descriptions(library_dir)
-    if not descriptions:
-        return []
+    has_library = bool(library_dir) and os.path.isdir(library_dir)
+    descriptions = load_aux_descriptions(library_dir) if has_library else {}
+    if names is not None:
+        descriptions = {n: d for n, d in descriptions.items() if n in names}
+    from_rule = {n: d for n, d in (rule_descriptions or {}).items() if n not in descriptions}
 
-    programs_dir = os.path.join(library_dir, "programs")
-    if not os.path.isdir(programs_dir):
+    programs_dir = os.path.join(library_dir, "programs") if has_library else ""
+    if has_library and not os.path.isdir(programs_dir):
         programs_dir = library_dir
 
-    blocks = []
-    for name in sorted(descriptions):
-        if names is not None and name not in names:
-            continue
-        arity = None
+    def library_arity(name):
         for ext in (".pl", ".py"):
             path = os.path.join(programs_dir, name + ext)
             if os.path.exists(path):
-                arity = _aux_head_arity(path) if ext == ".pl" else None
-                break
+                return _aux_head_arity(path) if ext == ".pl" else None
+        return None
+
+    def rule_arity(name):
+        for m in _HEAD_ARITY_RE.finditer(rule or ""):
+            if m.group(1) == name:
+                args = m.group(2).strip()
+                return 0 if not args else len([a for a in args.split(",") if a.strip()])
+        return None
+
+    blocks = []
+    for name, desc, arity in sorted(
+            [(n, d, library_arity(n)) for n, d in descriptions.items()]
+            + [(n, d, rule_arity(n)) for n, d in from_rule.items()]):
         arity = arity if arity in (1, 2) else 1
         label = _format_aux_name(name) or name
-        desc = descriptions.get(name) or ""
         # An arity-1 generated predicate may hold of the molecule OR of a single
         # atom — the arity alone doesn't say which — so scope "any" lets the user
         # drop it onto the molecule area or an atom, wherever it belongs. Arity-2
@@ -400,7 +410,7 @@ def aux_blocks(library_dir: str, names=None) -> list[dict]:
             "popular": False,
             "label": label,
             "nl": nl,
-            "description": desc,
+            "description": desc or "",
             "input": {"type": "toggle", "pred": name},
         })
     return blocks

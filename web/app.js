@@ -62,7 +62,8 @@ async function api(path, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
-  const data = await res.json();
+  // A proxy error page (502/504) is HTML, not JSON.
+  const data = await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }));
   if (!res.ok) {
     toast(data.error || "Request failed");
     throw new Error(data.error || res.statusText);
@@ -112,7 +113,7 @@ function hashStr(s) {
   return (h >>> 0).toString(36);
 }
 const depictUrl = (m, w, h) =>
-  `/api/depict?id=${encodeURIComponent(m.id)}&sid=${SID}&w=${w}&h=${h}&v=${hashStr(m.smiles || m.id)}`;
+  `api/depict?id=${encodeURIComponent(m.id)}&sid=${SID}&w=${w}&h=${h}&v=${hashStr(m.smiles || m.id)}`;
 
 // ── rendering ────────────────────────────────────────────────────────────
 function render(state) {
@@ -267,7 +268,7 @@ function renderConcept(concept) {
 // Persist an edited definition when the user leaves the box.
 $("concept-def").addEventListener("change", async () => {
   try {
-    await api("/api/concept/definition", { definition: $("concept-def").value });
+    await api("api/concept/definition", { definition: $("concept-def").value });
     loadPredicates();  // retrieval of generated predicates runs against the definition
   } catch (e) { /* toast already shown */ }
 });
@@ -455,7 +456,7 @@ async function openExplain(id, name) {
   $("explain-content").innerHTML = `<div class="muted">Building explanation…</div>`;
   $("explain-modal").classList.remove("hidden");
   try {
-    const data = await api(`/api/explain?id=${encodeURIComponent(id)}`);
+    const data = await api(`api/explain?id=${encodeURIComponent(id)}`);
     $("explain-content").innerHTML = `
       <div class="explain-struct"><img src="${data.image}" alt=""></div>
       <div class="explain-text">${escapeHtml(data.text)}</div>`;
@@ -477,7 +478,7 @@ $("class-search").addEventListener("input", (e) => {
   clearTimeout(acTimer);
   if (q.length < 2) { $("class-results").classList.add("hidden"); return; }
   acTimer = setTimeout(async () => {
-    const data = await api(`/api/classes/search?q=${encodeURIComponent(q)}`);
+    const data = await api(`api/classes/search?q=${encodeURIComponent(q)}`);
     const box = $("class-results");
     box.innerHTML = "";
     data.results.forEach((r) => {
@@ -506,7 +507,7 @@ $("fill-btn").onclick = async () => {
   btn.textContent = "Searching…";
   btn.disabled = true;
   try {
-    const data = await api("/api/session/from_class", {
+    const data = await api("api/session/from_class", {
       chebi_id: selectedClass.id,
       max_pos: parseInt($("max-pos").value),
       max_neg: parseInt($("max-neg").value),
@@ -527,7 +528,7 @@ document.querySelectorAll(".add-mol").forEach((btn) => {
     const input = $(label === "pos" ? "pos-input" : "neg-input");
     const text = input.value.trim();
     if (!text) return;
-    const data = await api("/api/session/add", { text, label });
+    const data = await api("api/session/add", { text, label });
     input.value = "";
     render(data); toast(data.message);
   };
@@ -577,19 +578,19 @@ async function mutateMolecule(path, body, applyLocal) {
     if (seq === mutationSeq) render(data);
   } catch (e) {
     // The backend rejected it — resync to its truth (toast already shown).
-    if (seq === mutationSeq) api("/api/state").then(render).catch(() => {});
+    if (seq === mutationSeq) api("api/state").then(render).catch(() => {});
   }
 }
 
 function setLabel(id, label) {
-  return mutateMolecule("/api/session/set_label", { id, label }, (s) => {
+  return mutateMolecule("api/session/set_label", { id, label }, (s) => {
     const m = s.molecules.find((x) => x.id === id);
     if (m) m.label = label;
   });
 }
 
 function removeMolecule(id) {
-  return mutateMolecule("/api/session/remove", { id }, (s) => {
+  return mutateMolecule("api/session/remove", { id }, (s) => {
     s.molecules = s.molecules.filter((x) => x.id !== id);
   });
 }
@@ -651,7 +652,7 @@ $("suggest-btn").onclick = async () => {
   $("suggest-btn").disabled = true;
   $("tinder-empty").textContent = "";
   try {
-    const data = await api("/api/suggest", { n: parseInt($("suggest-n").value) });
+    const data = await api("api/suggest", { n: parseInt($("suggest-n").value) });
     queue = data.candidates || [];
     qIdx = 0;
     showCurrent();
@@ -676,7 +677,7 @@ function showCurrent() {
   t.classList.remove("hidden");
   $("suggest-progress").textContent = `${qIdx + 1} / ${queue.length}`;
   $("t-sim").textContent = c.similarity;
-  $("t-struct").innerHTML = `<img src="/api/depict?chebi_id=${c.chebi_id}&w=320&h=250" alt="">`;
+  $("t-struct").innerHTML = `<img src="api/depict?chebi_id=${c.chebi_id}&w=320&h=250" alt="">`;
   $("t-name").textContent = c.name;
   $("t-id").innerHTML = chebiLink(c.chebi_id);
   $("t-def").innerHTML = sanitizeChebiHtml(c.definition || "");
@@ -689,9 +690,7 @@ function showCurrent() {
 async function decide(label) {
   const c = queue[qIdx];
   if (label) {
-    await api("/api/suggest/accept", { chebi_id: c.chebi_id, label });
-    const state = await api("/api/state");
-    render(state);
+    render(await api("api/suggest/accept", { chebi_id: c.chebi_id, label }));
   }
   qIdx++;
   showCurrent();
@@ -811,7 +810,7 @@ async function startLearn(fresh) {
   $("learn-full").textContent = "";
   revealEnd($("learn-progress"));
   try {
-    await api("/api/learn", { method, timeout: parseInt($("timeout").value), fresh });
+    await api("api/learn", { method, timeout: parseInt($("timeout").value), fresh });
   } catch (err) {
     $("learn-status").textContent = "";
     $("learn-btn").disabled = false;
@@ -828,8 +827,10 @@ async function pollLearn(run) {
   if (run !== learnPoll) return;
   let p;
   try {
-    p = await fetch("/api/learn/progress", { headers: apiHeaders() })
-      .then((r) => r.json());
+    const r = await fetch("api/learn/progress", { headers: apiHeaders() });
+    // An HTTP error won't fix itself by polling again; a network blip might.
+    p = r.ok ? await r.json()
+      : { done: true, error: `Lost track of the learning run (${r.status} ${r.statusText}).` };
   } catch (e) {
     if (run === learnPoll) setTimeout(() => pollLearn(run), 500);
     return;
@@ -893,7 +894,7 @@ $("toggle-log").onclick = () => {
 $("apply-rule-btn").onclick = async () => {
   const rule = assembledRule();
   try {
-    const data = await api("/api/rule/edit", { rule });
+    const data = await api("api/rule/edit", { rule });
     editorDirty = false;
     // The applied rule becomes a new selected entry; force the editor to reload it.
     lastRuleSig = null;
@@ -930,14 +931,14 @@ $("rule-history-list").addEventListener("click", async (e) => {
   if (!item) return;
   const id = item.dataset.id;
   if (lastState && id === lastState.selected_rule_id) return;
-  const data = await api("/api/rule/select", { id });
+  const data = await api("api/rule/select", { id });
   render(data);
   $("change-area").innerHTML = "";
 });
 
 // Re-score every history rule against the current examples (clears stale flags).
 $("reeval-btn").onclick = async () => {
-  const data = await api("/api/rules/reevaluate", {});
+  const data = await api("api/rules/reevaluate", {});
   render(data);
   toast(data.message);
 };
@@ -956,7 +957,7 @@ function renderChanges(changed) {
 
 // ── reset ────────────────────────────────────────────────────────────────────
 $("reset-btn").onclick = async () => {
-  const data = await api("/api/session/reset", {});
+  const data = await api("api/session/reset", {});
   render(data);
   loadPredicates();  // no class any more → no class-specific generated predicates
   queue = []; qIdx = 0;
@@ -987,15 +988,13 @@ Blocks.init({
   },
 });
 
-let catalogLoaded = false;
 async function loadPredicates() {
   try {
-    const data = await api("/api/predicates");
+    const data = await api("api/predicates");
     Blocks.setCatalog(data.catalog, data.aux, data.target);
-    catalogLoaded = true;
   } catch (e) { /* toast already shown */ }
 }
 
 // initial load
 loadPredicates();
-api("/api/state").then(render);
+api("api/state").then(render);

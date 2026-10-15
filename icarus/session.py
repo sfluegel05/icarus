@@ -8,26 +8,21 @@ edits can be diffed.
 """
 
 import itertools
+import math
 import re
 import threading
 import time
 
 from chebi_utils.read_molecule import smiles_or_inchi_to_mol
+from rdkit import Chem
 
 from . import data_store
 
 
 def _clean(v):
     """Normalise pandas NaN / empty strings to None."""
-    if v is None:
+    if v is None or (isinstance(v, float) and math.isnan(v)):
         return None
-    try:
-        import math
-
-        if isinstance(v, float) and math.isnan(v):
-            return None
-    except Exception:
-        pass
     s = str(v).strip()
     return s or None
 
@@ -156,8 +151,6 @@ class Session:
         # Use the RDKit-canonical SMILES as the stored form, matching what
         # add_from_text stores — otherwise the same structure added from both
         # sources would not deduplicate and would evade suggestion exclusion.
-        from rdkit import Chem
-
         try:
             canonical = Chem.MolToSmiles(mol)
         except Exception:
@@ -178,8 +171,6 @@ class Session:
             if mol is None:
                 errors.append(s)
                 continue
-            from rdkit import Chem
-
             try:
                 canonical = Chem.MolToSmiles(mol)
             except Exception:

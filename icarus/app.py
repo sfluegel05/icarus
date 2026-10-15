@@ -14,14 +14,13 @@ import functools
 import re
 import threading
 import traceback
+import types
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
-
-from chebi_utils.read_molecule import smiles_or_inchi_to_mol
 
 from . import config, data_store, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
@@ -119,12 +118,21 @@ def state_dict(s: Session) -> dict:
     return out
 
 
-def _int(v, default):
-    """Parse an int from user input, falling back to ``default`` on bad values."""
+def _int(v, default, lo, hi):
+    """Parse an int from user input, falling back to ``default`` on bad values and
+    clamped to ``[lo, hi]`` so a public client can't ask for unbounded work."""
     try:
-        return int(v)
+        v = int(v)
     except (TypeError, ValueError):
-        return default
+        v = default
+    return min(max(v, lo), hi)
+
+
+# Bounds on per-request work (request sizes the UI never comes close to).
+_MAX_DEPICT_PX = 1000
+_MAX_SUGGEST = 50
+_MAX_CLASS_EXAMPLES = 100
+_MAX_ADD_LINES = 200
 
 
 def ok(s: Session, recompute: bool = True, **extra):
@@ -186,11 +194,11 @@ async def about(request: Request):
 
 
 async def depict(request: Request):
-    """Return an SVG 2D depiction for a session molecule (``id`` + ``sid``), a ChEBI
-    molecule (``chebi_id``), or an ad-hoc ``smiles``/InChI string."""
+    """Return an SVG 2D depiction for a session molecule (``id`` + ``sid``) or a ChEBI
+    molecule (``chebi_id``)."""
     q = request.query_params
-    w = _int(q.get("w"), 280)
-    h = _int(q.get("h"), 220)
+    w = _int(q.get("w"), 280, 40, _MAX_DEPICT_PX)
+    h = _int(q.get("h"), 220, 40, _MAX_DEPICT_PX)
     mol = None
     if q.get("id"):
         sid = _session_id(request)
@@ -201,11 +209,10 @@ async def depict(request: Request):
         cid = str(q["chebi_id"])
         if cid in df.index:
             mol = df.loc[cid, "mol"]
-    elif q.get("smiles"):
-        mol = smiles_or_inchi_to_mol(q["smiles"])
     svg = render.mol_to_svg(mol, w, h)
+    # private: session-molecule URLs are per user, so shared proxy caches must not keep them.
     return Response(svg, media_type="image/svg+xml",
-                    headers={"Cache-Control": "public, max-age=3600"})
+                    headers={"Cache-Control": "private, max-age=3600"})
 
 
 @with_session
@@ -292,8 +299,8 @@ async def classes_search(request: Request):
 async def session_from_class(request: Request, s: Session):
     body = await request.json()
     chebi_id = str(body.get("chebi_id", "")).strip()
-    max_pos = _int(body.get("max_pos"), config.DEFAULT_MAX_POS)
-    max_neg = _int(body.get("max_neg"), config.DEFAULT_MAX_NEG)
+    max_pos = _int(body.get("max_pos"), config.DEFAULT_MAX_POS, 1, _MAX_CLASS_EXAMPLES)
+    max_neg = _int(body.get("max_neg"), config.DEFAULT_MAX_NEG, 1, _MAX_CLASS_EXAMPLES)
     if not chebi_id:
         return JSONResponse({"error": "No ChEBI id given."}, status_code=400)
     with s.lock:
@@ -311,8 +318,11 @@ async def session_from_class(request: Request, s: Session):
 @with_session
 async def session_add(request: Request, s: Session):
     body = await request.json()
-    text = body.get("text", "")
+    text = str(body.get("text", ""))
     label = body.get("label", "pos")
+    if len(text.splitlines()) > _MAX_ADD_LINES:
+        return JSONResponse({"error": f"At most {_MAX_ADD_LINES} molecules per request."},
+                            status_code=400)
     with s.lock:
         added, errors = s.add_from_text(text, label)
         msg = f"Added {len(added)} molecule(s)."
@@ -362,7 +372,7 @@ async def concept_definition(request: Request, s: Session):
 @with_session
 async def suggest(request: Request, s: Session):
     body = await request.json()
-    n = _int(body.get("n"), 10)
+    n = _int(body.get("n"), 10, 1, _MAX_SUGGEST)
     with s.lock:
         positives = s.positives()
         if not positives:
@@ -373,22 +383,12 @@ async def suggest(request: Request, s: Session):
         candidates = similarity.suggest(positives, exclude_ids, exclude_smiles, n=n)
         # If a rule exists, attach its prediction for each candidate.
         if s.current_rule and candidates:
-            from chebi_utils.read_molecule import smiles_or_inchi_to_mol
-
-            class _Tmp:
-                def __init__(self, cid, mol):
-                    self.id = cid
-                    self.mol = mol
-
-            tmp = []
+            df = data_store.molecules()
+            preds = ilp.classify(s.current_rule, [
+                types.SimpleNamespace(id=c["chebi_id"], mol=df.loc[c["chebi_id"], "mol"])
+                for c in candidates])
             for c in candidates:
-                mol = smiles_or_inchi_to_mol(c["smiles"])
-                if mol is not None:
-                    tmp.append(_Tmp(c["chebi_id"], mol))
-            if tmp:
-                preds = ilp.classify(s.current_rule, tmp)
-                for c in candidates:
-                    c["prediction"] = preds.get(c["chebi_id"])
+                c["prediction"] = preds.get(c["chebi_id"])
         return JSONResponse({"candidates": candidates})
 
 
@@ -410,6 +410,10 @@ async def suggest_accept(request: Request, s: Session):
 # How each method is named in the UI's live-output panel and status messages.
 _METHOD_LABELS = {"popper": "Popper", "aleph": "Aleph", "llm": f"LLM ({config.LLM_MODEL_NAME})"}
 
+# Server-wide cap on simultaneous learning runs (each Popper / Aleph run is a CPU-bound
+# subprocess), so many concurrent users can't overload the host.
+_LEARN_SLOTS = threading.BoundedSemaphore(config.MAX_CONCURRENT_LEARNS)
+
 
 def _learn_worker(s, pos, neg, timeout, method, concept, log_fields, use_cache=True):
     def on_line(line):
@@ -427,6 +431,8 @@ def _learn_worker(s, pos, neg, timeout, method, concept, log_fields, use_cache=T
         with s.learn_lock:
             s.learn.update(running=False, done=True, error=str(e))
         return
+    finally:
+        _LEARN_SLOTS.release()
 
     rule = result.get("rule")
     with s.lock:
@@ -460,7 +466,7 @@ async def learn(request: Request, s: Session):
         body = await request.json()
     except Exception:
         body = {}
-    timeout = _int(body.get("timeout"), config.DEFAULT_TIMEOUT)
+    timeout = _int(body.get("timeout"), config.DEFAULT_TIMEOUT, 1, config.MAX_TIMEOUT)
     method = str(body.get("method") or config.DEFAULT_LEARN_METHOD).lower()
     if method not in config.LEARN_METHODS:
         return JSONResponse({"error": f"Unknown method '{method}'."}, status_code=400)
@@ -472,24 +478,23 @@ async def learn(request: Request, s: Session):
                   "client": request.client.host if request.client else None,
                   "user_agent": request.headers.get("user-agent"), "invited": s.invited}
 
-    with s.learn_lock:
-        if s.learn["running"]:
-            return JSONResponse({"error": "Already learning."}, status_code=409)
-        s.learn.update(running=True, done=False, error=None, lines=[], message=None,
-                       score=None, method=method, cached=False)
-
     with s.lock:
         pos = s.positives()
         neg = [m for m in s.molecules.values() if m.label == "neg"]
         concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
                    "definition": s.concept_definition}
-
     if not pos or not neg:
-        with s.learn_lock:
-            s.learn.update(running=False, done=True,
-                           error="Need at least one positive and one negative example.")
         return JSONResponse(
             {"error": "Need at least one positive and one negative example."}, status_code=400)
+
+    with s.learn_lock:
+        if s.learn["running"]:
+            return JSONResponse({"error": "Already learning."}, status_code=409)
+        if not _LEARN_SLOTS.acquire(blocking=False):
+            return JSONResponse({"error": "The server is busy with other learning runs. "
+                                          "Please try again in a minute."}, status_code=503)
+        s.learn.update(running=True, done=False, error=None, lines=[], message=None,
+                       score=None, method=method, cached=False)
 
     threading.Thread(target=_learn_worker,
                      args=(s, pos, neg, timeout, method, concept, log_fields, use_cache),

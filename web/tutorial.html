@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tutorial — ICaRuS</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
   <header class="navbar">
     <div class="navbar-left">
-      <h1 class="logo"><a href="/" title="Interactive ChemicAl RUle System">ICaRuS</a></h1>
+      <h1 class="logo"><a href="./" title="Interactive ChemicAl RUle System">ICaRuS</a></h1>
       <nav class="nav-links">
-        <a href="/">Learn</a>
-        <a href="/tutorial">Tutorial</a>
-        <a href="/about">About</a>
+        <a href="./">Learn</a>
+        <a href="tutorial">Tutorial</a>
+        <a href="about">About</a>
         <a href="https://github.com/sfluegel05/icarus/issues/new" target="_blank" rel="noopener">Report an Issue</a>
       </nav>
     </div>
@@ -27,7 +27,7 @@
         from molecules you label as positive or negative. You start from a ChEBI class or
         from SMILES / InChI strings, let ICaRuS suggest more molecules, learn a rule with an
         ILP system, and then inspect, edit and compare the rules. This tutorial walks through
-        one complete session on the web page at <a href="/">/</a>.
+        one complete session on the web page at <a href="./">/</a>.
       </p>
       <p class="muted">
         Each browser tab has its own session. Everything below was done in one tab, using
@@ -61,11 +61,11 @@
         molecules are used; generic class structures with wildcard atoms are skipped.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/01-seed-class-search.png" alt="Class search with 'carboxylic acid' selected">
+        <img class="tut-shot" src="static/tutorial/01-seed-class-search.png" alt="Class search with 'carboxylic acid' selected">
         <figcaption>Searching for a ChEBI class and selecting it.</figcaption>
       </figure>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/01-seed-examples.png" alt="Positive and negative example grids after filling from the class">
+        <img class="tut-shot" src="static/tutorial/01-seed-examples.png" alt="Positive and negative example grids after filling from the class">
         <figcaption>After <em>Fill examples</em>: eight positive (green) and eight negative (red) molecules.</figcaption>
       </figure>
     </section>
@@ -85,7 +85,7 @@
         other column.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot tut-shot-narrow" src="/static/tutorial/02-molecule-modal.png" alt="Molecule details dialog with move and remove buttons">
+        <img class="tut-shot tut-shot-narrow" src="static/tutorial/02-molecule-modal.png" alt="Molecule details dialog with move and remove buttons">
         <figcaption>The molecule details dialog, with move and remove actions.</figcaption>
       </figure>
       <p>
@@ -94,7 +94,7 @@
         negatives (ethanol and ethyl acetate, which are not acids) were added.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/02-examples-after-add.png" alt="Example grids after adding SMILES strings">
+        <img class="tut-shot" src="static/tutorial/02-examples-after-add.png" alt="Example grids after adding SMILES strings">
         <figcaption>The example grids after adding molecules by SMILES.</figcaption>
       </figure>
     </section>
@@ -115,7 +115,7 @@
         predicts, so you can confirm or contradict it.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot tut-shot-narrow" src="/static/tutorial/03-suggestion-card.png" alt="A suggested molecule card with positive, skip and negative buttons">
+        <img class="tut-shot tut-shot-narrow" src="static/tutorial/03-suggestion-card.png" alt="A suggested molecule card with positive, skip and negative buttons">
         <figcaption>One suggestion at a time.</figcaption>
       </figure>
       <p>
@@ -123,7 +123,7 @@
         The counts in the example grids were updated after each choice.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/03-suggestions-labelled.png" alt="Suggestion section after labelling two molecules">
+        <img class="tut-shot" src="static/tutorial/03-suggestions-labelled.png" alt="Suggestion section after labelling two molecules">
         <figcaption>The suggestion section after two labels. The batch continues until its molecules are used up.</figcaption>
       </figure>
     </section>
@@ -144,7 +144,7 @@
         appears below, with a result summary.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/04-learn-output-live.png" alt="Popper output panel while learning">
+        <img class="tut-shot" src="static/tutorial/04-learn-output-live.png" alt="Popper output panel while learning">
         <figcaption>The live output of Popper.</figcaption>
       </figure>
       <p>The result shows:</p>
@@ -159,7 +159,7 @@
         </li>
       </ul>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/04-learned-rule.png" alt="Learned rule with block editor, natural-language translation, confusion counts and mismatches">
+        <img class="tut-shot" src="static/tutorial/04-learned-rule.png" alt="Learned rule with block editor, natural-language translation, confusion counts and mismatches">
         <figcaption>The learned rule, its translation, the confusion counts, and the one misclassified molecule.</figcaption>
       </figure>
       <p>
@@ -167,7 +167,7 @@
         explanation highlights the responsible atoms and lists the facts that match.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot tut-shot-narrow" src="/static/tutorial/04-explain.png" alt="Explanation dialog for why a molecule is positive">
+        <img class="tut-shot tut-shot-narrow" src="static/tutorial/04-explain.png" alt="Explanation dialog for why a molecule is positive">
         <figcaption>The explanation for a positive prediction.</figcaption>
       </figure>
     </section>
@@ -187,11 +187,11 @@
         classification that changed.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/05-advanced-prolog.png" alt="Advanced Prolog editor with an added literal">
+        <img class="tut-shot" src="static/tutorial/05-advanced-prolog.png" alt="Advanced Prolog editor with an added literal">
         <figcaption>The edited Prolog. The added part is <code>, has_atom(V0,V1), n(V1)</code>.</figcaption>
       </figure>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/05-applied-edit.png" alt="Rule area after applying an edit, showing new confusion counts and changed classifications">
+        <img class="tut-shot" src="static/tutorial/05-applied-edit.png" alt="Rule area after applying an edit, showing new confusion counts and changed classifications">
         <figcaption>After applying the edit: the new counts, the newly misclassified molecules, and the list of changed classifications.</figcaption>
       </figure>
       <p>
@@ -216,7 +216,7 @@
         learner can return a different rule than before.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/06-relearned-rule.png" alt="Rule area after learning again with more examples">
+        <img class="tut-shot" src="static/tutorial/06-relearned-rule.png" alt="Rule area after learning again with more examples">
         <figcaption>The rule after the second learning run.</figcaption>
       </figure>
     </section>
@@ -237,11 +237,11 @@
         current examples.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/07-rule-history.png" alt="Rule history list with three entries">
+        <img class="tut-shot" src="static/tutorial/07-rule-history.png" alt="Rule history list with three entries">
         <figcaption>The rule history, newest first: the new learned rule (selected), the edited rule, and the first learned rule. The last two are marked as stale.</figcaption>
       </figure>
       <figure class="tut-fig">
-        <img class="tut-shot" src="/static/tutorial/07-rule-history-reevaluated.png" alt="Rule history after re-evaluating all entries">
+        <img class="tut-shot" src="static/tutorial/07-rule-history-reevaluated.png" alt="Rule history after re-evaluating all entries">
         <figcaption>After <em>Re-evaluate all</em>, the counts match the current examples.</figcaption>
       </figure>
     </section>

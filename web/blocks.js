@@ -280,8 +280,6 @@
     paletteEl: null,
     canvasEl: null,
     onChangeCb: null,
-    loadedText: "",
-    dirty: false,
     selected: null,   // {clauseIdx, kind:'mol'|'atom', atomId?} for click-to-add
 
     init(opts) {
@@ -312,22 +310,18 @@
     },
 
     changed() {
-      this.dirty = true;
       if (this.onChangeCb) this.onChangeCb();
     },
 
     // Load a rule's text into the editor (rebuilds the model + UI).
     load(text) {
-      this.loadedText = text || "";
       this.model = (text && text.trim()) ? parseRule(text) : emptyModel();
       if (!this.model.clauses.length) this.model = emptyModel();
-      this.dirty = false;
       this.selected = null;
       this.renderCanvas();
     },
 
     compile() { return compileModel(this.model); },
-    isDirty() { return this.dirty; },
 
     // Add a predicate chip to an area's chip list, dropping any exact duplicate and
     // any mutually-exclusive chip (same group) first — so a second element / charge
@@ -769,8 +763,6 @@
     setCatalog: (c, a, t) => Editor.setCatalog(c, a, t),
     load: (t) => Editor.load(t),
     compile: () => Editor.compile(),
-    isDirty: () => Editor.isDirty(),
-    loadedText: () => Editor.loadedText,
     _pure: { compileModel, parseRule, describe, splitClauses, groupOf, forceLayout },
   };
 

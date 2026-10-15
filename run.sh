@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
-# Launch the ICaRuS demo. By default it runs under this project's own virtualenv
-# (.wslvenv, with requirements.txt installed: chebILP, chebi_utils, popper, clingo,
-# rdkit, xclingo, PIL, ...) and reads the ChEBI data from this project's data/.
+# Launch the ICaRuS web app (uvicorn, single process: sessions live in memory).
 #
-# Usage (from Windows, in this repo):   wsl -e bash run.sh
+# Usage:   ./run.sh            (from Windows: wsl -e bash run.sh)
 # then open http://localhost:8000
 #
-# Configure for another system with environment variables (all optional):
-#   ICARUS_PYTHON        interpreter to use (default: ./.wslvenv/bin/python)
-#   ICARUS_CHEBI_VERSION ChEBI release the data is for (default 251)
-#   ICARUS_DATA_DIR      data dir: ChEBI data files, fingerprint cache, ILP work files
-#   ICARUS_POOL_SIZE     number of molecules fingerprinted for suggestions
-#   ICARUS_PORT          HTTP port (default 8000)
+# Environment (all optional; .env in this directory is read by the app itself):
+#   ICARUS_PYTHON  interpreter to use (default: ./.venv, then ./.wslvenv, then python3 on PATH)
+#   ICARUS_HOST    bind address (default 0.0.0.0; use 127.0.0.1 behind a reverse proxy)
+#   ICARUS_PORT    HTTP port (default 8000)
+# Extra arguments are passed to uvicorn, e.g. ./run.sh --log-level warning
+# Everything else (data dir, limits, LLM) is configured in icarus/config.py / .env.
 set -euo pipefail
 
 ICARUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="${ICARUS_PYTHON:-$ICARUS_DIR/.wslvenv/bin/python}"
-if [ ! -x "$PY" ]; then
-  # No project venv yet: fall back to whatever python is on PATH (e.g. an activated venv).
-  PY="$(command -v python3 || command -v python || true)"
-  [ -n "$PY" ] || { echo "run.sh: no python found; create .wslvenv or set ICARUS_PYTHON" >&2; exit 1; }
+PY="${ICARUS_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for cand in "$ICARUS_DIR/.venv/bin/python" "$ICARUS_DIR/.wslvenv/bin/python"; do
+    [ -x "$cand" ] && { PY="$cand"; break; }
+  done
 fi
+PY="${PY:-$(command -v python3 || command -v python || true)}"
+[ -n "$PY" ] || { echo "run.sh: no python found; create .venv or set ICARUS_PYTHON" >&2; exit 1; }
 echo "run.sh: using $PY" >&2
-PORT="${ICARUS_PORT:-8000}"
 
 export PYTHONPATH="$ICARUS_DIR:${PYTHONPATH:-}"
 cd "$ICARUS_DIR"
 
-exec "$PY" -m uvicorn icarus.app:app --host 0.0.0.0 --port "$PORT" "$@"
+exec "$PY" -m uvicorn icarus.app:app \
+  --host "${ICARUS_HOST:-0.0.0.0}" --port "${ICARUS_PORT:-8000}" "$@"

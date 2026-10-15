@@ -1,0 +1,19 @@
+# systemd unit for ICaRuS. Adjust User and the paths, then:
+#   sudo cp deploy/icarus.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now icarus
+#   journalctl -u icarus -f        # logs
+[Unit]
+Description=ICaRuS web app
+After=network.target
+
+[Service]
+User=icarus
+WorkingDirectory=/srv/icarus
+# Bind to localhost only; nginx (deploy/nginx.conf) is the public entry point.
+Environment=ICARUS_HOST=127.0.0.1
+Environment=ICARUS_PORT=8000
+ExecStart=/bin/bash /srv/icarus/run.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

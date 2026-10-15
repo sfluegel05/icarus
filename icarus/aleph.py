@@ -84,9 +84,9 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
                                          concept=concept, on_line=on_line)
 
         on_line(f"Running Aleph via SWI-Prolog (up to {timeout}s)…")
-        # icarus's Popper path is non-noisy — it must find a perfectly-separating rule — so run
-        # Aleph the same way (chebILP's defaults allow up to noise=200 negatives, meant for the
-        # noisy class-scale problems). minpos=1 lets it learn from a single-positive session.
+        # Non-noisy: seek a cleanly-separating rule (chebILP's defaults allow up to
+        # noise=200 negatives, meant for class-scale problems). minpos=1 lets it learn
+        # from a single-positive session.
         result = run_ilp_training_aleph(
             _HEAD_ID, stem, bias_path, timeout,
             max_body=config.DEFAULT_ALEPH_MAX_BODY, log_dir=work_dir,
@@ -104,10 +104,5 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
         except OSError:
             pass
 
-    rule = _rewrite_head(result.get("prog_str"))
-    score = result.get("score")
-    score_dict = None
-    if score:
-        tp, fn, tn, fp = score
-        score_dict = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
-    return {"rule": rule, "score": score_dict}
+    return {"rule": _rewrite_head(result.get("prog_str")),
+            "score": ilp.score_dict(result.get("score"))}

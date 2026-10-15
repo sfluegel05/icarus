@@ -2,8 +2,8 @@
 
 All data lives in this project's ``data/`` directory (override with
 ``ICARUS_DATA_DIR``), including the pre-built ChEBI v251 molecule DataFrame and
-hierarchy graph. The app is meant to run under this project's own ``.wslvenv``
-interpreter (Linux), with ``chebILP`` and ``chebi_utils`` installed from pip.
+hierarchy graph. Every setting below can be overridden by an environment variable
+or a ``.env`` file in the project root (see ``.env.example`` and the README).
 """
 
 import os
@@ -77,6 +77,10 @@ DEFAULT_MAX_VARS = 4
 DEFAULT_MAX_BODY = 5
 DEFAULT_MAX_CLAUSES = 2
 DEFAULT_TIMEOUT = 60
+# Upper bound on the user-settable ILP timeout (seconds).
+MAX_TIMEOUT = int(os.environ.get("ICARUS_MAX_TIMEOUT", "300"))
+# Learning runs allowed at once across all users (the rest get "server busy").
+MAX_CONCURRENT_LEARNS = int(os.environ.get("ICARUS_MAX_CONCURRENT_LEARNS", "4"))
 # Wall-clock budget (seconds) for one LLM learn: all model calls of the pipeline
 # together. Enforced server-side (not client-settable) in icarus/llm_guard.py.
 LLM_TIMEOUT = int(os.environ.get("ICARUS_LLM_TIMEOUT", "300"))

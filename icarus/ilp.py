@@ -19,7 +19,6 @@ import tempfile
 import pandas as pd
 
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
-from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_problem_builder import build_background_chemlog
 from chebILP.utils import split_prolog_literals
 
@@ -209,26 +208,12 @@ def write_problem(work_dir, pos_mols, neg_mols, concept=None, on_line=None):
     return exs_path, bk_path, bias_path
 
 
-def learn(pos_mols, neg_mols, timeout=None) -> dict:
-    """Run noisy (MDL) Popper on the labelled molecules.
-
-    Returns ``{"rule": str|None, "score": {...}|None}``.
-    """
-    if not pos_mols or not neg_mols:
-        return {"rule": None, "score": None, "error": "Need at least one positive and one negative example."}
-
-    timeout = timeout or config.DEFAULT_TIMEOUT
-    with run_dir("popper_") as work_dir:
-        exs_path, bk_path, bias_path = write_problem(work_dir, pos_mols, neg_mols)
-        settings = {"timeout": timeout, "noisy": True}  # MDL cost fn: best rule, need not separate perfectly
-        result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings)
-    rule = result.get("prog_str")
-    score = result.get("score")
-    score_dict = None
-    if score:
-        tp, fn, tn, fp = score
-        score_dict = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
-    return {"rule": rule, "score": score_dict}
+def score_dict(score) -> dict | None:
+    """An ILP learner's ``(tp, fn, tn, fp)`` score tuple as a confusion dict."""
+    if not score:
+        return None
+    tp, fn, tn, fp = score
+    return {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
 
 
 _RESULT_MARKER = "__ICARUS_RESULT__"
@@ -279,10 +264,7 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=None) -> dict:
                 try:
                     data = json.loads(line[len(_RESULT_MARKER):])
                     result["rule"] = data.get("prog_str")
-                    sc = data.get("score")
-                    if sc:
-                        tp, fn, tn, fp = sc
-                        result["score"] = {"TP": tp, "FN": fn, "TN": tn, "FP": fp}
+                    result["score"] = score_dict(data.get("score"))
                 except Exception:
                     pass
                 continue
@@ -305,12 +287,6 @@ def learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model=None, con
     LLM quota check (``llm_guard.admit``); the ILP backends ignore it, as they do
     ``use_cache`` (``False`` = prompt the LLM even if the library has a cached rule).
     """
-    return _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept,
-                           admit, use_cache)
-
-
-def _learn_dispatch(method, pos_mols, neg_mols, timeout, on_line, model, concept, admit,
-                    use_cache) -> dict:
     if method in ("popper", "aleph"):
         if method == "popper":
             result = learn_streaming(pos_mols, neg_mols, timeout, on_line, concept=concept)
@@ -523,11 +499,6 @@ def rule_to_nl_parts(rule: str) -> dict | None:
         parts["aux"].append({"name": name, "rule": _aux_header(name, descriptions) + text,
                              "nl": _translate_one(text, descriptions)})
     return parts
-
-
-def rule_to_nl(rule: str) -> str | None:
-    """Natural-language paraphrase of a single-head learned/edited rule (chebILP)."""
-    return _translate_one(rule)
 
 
 _ANON_VAR_RE = re.compile(r"(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])")

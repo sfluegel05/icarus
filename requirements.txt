@@ -1,11 +1,10 @@
-# Third-party runtime dependencies for ICaRuS.
-# Versions are the reference environment (Python 3.11+); relax if needed, but keep
-# rdkit close, since molecules.pkl contains pickled RDKit Mol objects.
+# Runtime dependencies for ICaRuS (Python 3.14+, required by current Popper).
+# Install with:  pip install -r requirements.txt
+# Keep rdkit close to the pinned version: molecules.pkl contains pickled RDKit Mol
+# objects, and a different rdkit may fail to unpickle them.
 #
-# This list does NOT cover:
-#   - popper (ILP engine), installed separately from its checkout:
-#       pip install -e ../popper-sfluegel
-#   - the two ChEBI data files (see README → Running on another system).
+# Not covered here (system packages): SWI-Prolog (`swipl`, for Popper and Aleph) and
+# a C compiler (Popper builds a Cython extension on install).
 
 starlette==1.1.0
 uvicorn==0.48.0
@@ -15,5 +14,8 @@ networkx==3.6.1
 clingo==5.8.0
 xclingo==2.0b14
 pillow==12.1.1
+python-dotenv
 chebi_utils==0.4
 chebILP[explain,llm]==1.2
+# Popper (ILP engine), pinned to a tested upstream commit.
+popper @ git+https://github.com/logic-and-learning-lab/Popper@5c608d3ec87e4975866042fe326e9a317277e021

@@ -19,7 +19,7 @@
     </div>
   </header>
 
-  <main>
+  <main class="doc-main">
     <section class="card doc-prose">
       <h2>About ICaRuS</h2>
       <p>
@@ -27,7 +27,18 @@
         concepts as logic rules. You give it example molecules that belong to a
         concept (positives) and molecules that do not (negatives). ICaRuS then
         learns a rule, written in Prolog, that separates the two groups. You can
-        inspect the rule, edit it by hand, and refine it over several rounds.
+        inspect the rule, edit it by hand, and refine it over several rounds. The
+        <a href="tutorial">tutorial</a> walks through one complete session.
+      </p>
+      <div class="doc-links">
+        <a href="https://github.com/sfluegel05/icarus" target="_blank" rel="noopener">ICaRuS on GitHub</a>
+        
+      </div>
+      <p>
+        The source code of ICaRuS is available on
+        <a href="https://github.com/sfluegel05/icarus" target="_blank" rel="noopener">GitHub</a>.
+        If something does not work as expected, please
+        <a href="https://github.com/sfluegel05/icarus/issues/new" target="_blank" rel="noopener">report an issue</a>.
       </p>
     </section>
 
@@ -36,7 +47,9 @@
       <p>
         Every molecule is translated into first-order logic facts that describe
         its atoms and elements, charges, bonds, rings, aromaticity and similar
-        properties. This translation comes from chebILP and python-chebi-utils,
+        properties. This translation comes from
+        <a href="https://github.com/ChEB-AI/chebILP" target="_blank" rel="noopener">chebILP</a> and
+        <a href="https://github.com/ChEB-AI/python-chebi-utils" target="_blank" rel="noopener">python-chebi-utils</a>,
         the same atom-level representation that chebILP uses for ChEBI classes.
         Because all molecules share this vocabulary, a learned rule can be
         checked against any molecule.
@@ -46,12 +59,13 @@
     <section class="card doc-prose">
       <h2>Where the examples come from</h2>
       <p>
-        You can pick a ChEBI class to fill the example boxes automatically. The
-        positives are the smallest molecules below that class in the ChEBI
-        hierarchy, which gives the minimal core of the class. The negatives are
-        molecules that sit close to the class in the hierarchy but are not part
-        of it. Generic class structures with wildcard atoms are left out. You can
-        also paste your own SMILES or InChI strings.
+        You can pick a class from <a href="https://www.ebi.ac.uk/chebi/" target="_blank" rel="noopener">ChEBI</a>
+        (Chemical Entities of Biological Interest) to fill the example boxes
+        automatically. The positives are the smallest molecules below that class
+        in the ChEBI hierarchy, which gives the minimal core of the class. The
+        negatives are molecules that sit close to the class in the hierarchy but
+        are not part of it. Generic class structures with wildcard atoms are left
+        out. You can also paste your own SMILES or InChI strings.
       </p>
       <p>
         To suggest more molecules, ICaRuS ranks candidates by their similarity to
@@ -66,25 +80,31 @@
       <h2>Three learning methods</h2>
       <ul>
         <li>
-          <strong>Popper</strong> is an inductive logic programming (ILP) system.
-          It runs in noisy mode with an MDL cost function, so it returns the best
-          rule it finds even when no rule separates the examples perfectly.
+          <strong><a href="https://github.com/logic-and-learning-lab/Popper" target="_blank" rel="noopener">Popper</a></strong>
+          is an inductive logic programming (ILP) system. ICaRuS uses Popper 5.0.1
+          in noisy mode with an MDL cost function, so it returns the best rule it
+          finds even when no rule separates the examples perfectly.
         </li>
         <li>
-          <strong>Aleph</strong> is another ILP system, running under SWI-Prolog.
+          <strong><a href="https://www.cs.ox.ac.uk/activities/programinduction/Aleph/aleph.html" target="_blank" rel="noopener">Aleph</a></strong>
+          is another ILP system, running under
+          <a href="https://www.swi-prolog.org/" target="_blank" rel="noopener">SWI-Prolog</a>.
           It runs in non-noisy mode and looks for a rule that cleanly separates
           the examples.
         </li>
         <li>
-          <strong>LLM</strong> uses chebILP's rule-generation pipeline. The model
-          receives the concept name, its definition and sibling classes. It writes
-          auxiliary predicates and a candidate rule. The predicates are validated,
-          and the candidate is scored on the examples, with one feedback round if
-          the score is weak. The model can reuse predicates from a fixed rule
-          library, built in advance for ChEBI classes. If the library already holds
-          a rule for the selected ChEBI class, that cached rule is shown first, and
-          a button lets you prompt the model for a fresh one. The model in use is
-          named in the interface.
+          <strong>LLM</strong> uses
+          <a href="https://github.com/ChEB-AI/chebILP" target="_blank" rel="noopener">chebILP</a>'s
+          rule-generation pipeline. The model receives the concept name, its
+          definition (which you can edit) and sibling classes. It writes auxiliary
+          predicates and a candidate rule. The predicates are validated, and the
+          candidate is scored on the examples, with one feedback round if the
+          score is weak. The model can reuse predicates from a fixed rule library,
+          built in advance for ChEBI classes. If the library already holds a rule
+          for the selected ChEBI class, that cached rule is shown first, and the
+          <em>Prompt the LLM</em> button asks the model for a fresh one. The model
+          in use is named in the interface. On the public demo, the number of
+          model prompts per session is limited.
         </li>
       </ul>
       <p>
@@ -105,19 +125,6 @@
         with the responsible atoms highlighted. The rule history keeps earlier
         rules so you can compare them.
       </p>
-    </section>
-
-    <section class="card doc-prose">
-      <h2>Learn more and source code</h2>
-      <ul>
-        <li><a href="https://github.com/sfluegel05/icarus" target="_blank" rel="noopener">ICaRuS</a> (this demo)</li>
-        <li><a href="https://github.com/ChEB-AI/chebILP" target="_blank" rel="noopener">chebILP</a> (FOL translation, rule pipeline, explanations)</li>
-        <li><a href="https://github.com/ChEB-AI/python-chebi-utils" target="_blank" rel="noopener">python-chebi-utils</a> (ChEBI data and molecule to logic)</li>
-        <li><a href="https://github.com/sfluegel05/Popper" target="_blank" rel="noopener">Popper</a> (fork used here); upstream: <a href="https://github.com/logic-and-learning-lab/Popper" target="_blank" rel="noopener">Popper</a></li>
-        <li><a href="https://potassco.org/clingo/" target="_blank" rel="noopener">clingo</a> and <a href="https://github.com/bramucas/xclingo2" target="_blank" rel="noopener">xclingo</a></li>
-        <li><a href="https://www.ebi.ac.uk/chebi/" target="_blank" rel="noopener">ChEBI</a></li>
-        <li><a href="https://github.com/sfluegel05/icarus/issues" target="_blank" rel="noopener">Report issues</a></li>
-      </ul>
     </section>
   </main>
 </body>

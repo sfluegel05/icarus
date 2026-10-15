@@ -19,20 +19,20 @@
     </div>
   </header>
 
-  <main>
+  <main class="doc-main">
     <section class="card tut-intro">
       <h2>Tutorial: learn a chemical rule from examples</h2>
       <p>
-        ICaRuS learns a Prolog rule for a chemical concept (for example "carboxylic acid")
-        from molecules you label as positive or negative. You start from a ChEBI class or
-        from SMILES / InChI strings, let ICaRuS suggest more molecules, learn a rule with an
-        ILP system, and then inspect, edit and compare the rules. This tutorial walks through
-        one complete session on the web page at <a href="./">/</a>.
-      </p>
-      <p class="muted">
-        Each browser tab has its own session. Everything below was done in one tab, using
-        the Popper method. Your results will differ slightly, because the suggestions and
-        the learned rule depend on the examples.
+        ICaRuS learns a logical rule for a chemical concept (for example "carboxylic acid")
+        from molecules you label as positive or negative. You start from a
+        <a href="https://www.ebi.ac.uk/chebi/" target="_blank" rel="noopener">ChEBI</a>
+        class or from SMILES / InChI strings, let ICaRuS suggest more molecules and learn a rule
+        with an ILP system (<a href="https://github.com/logic-and-learning-lab/Popper" target="_blank" rel="noopener">Popper</a>
+        or <a href="https://www.cs.ox.ac.uk/activities/programinduction/Aleph/aleph.html" target="_blank" rel="noopener">Aleph</a>)
+        or with an LLM (Claude Haiku 5.5). Then, you can inspect, edit and compare the rules. This tutorial walks through
+        one complete session on the <a href="./">Learn</a> page. The <a href="about">About</a>
+        page explains some additional background. The source code is available on
+        <a href="https://github.com/sfluegel05/icarus" target="_blank" rel="noopener">GitHub</a>.
       </p>
       <h3>Contents</h3>
       <ol class="tut-toc">
@@ -50,9 +50,9 @@
     <section class="card tut-step" id="step-1">
       <h2>1 · Seed the examples from a ChEBI class</h2>
       <p>
-        Type at least two letters into <em>Seed from a ChEBI class</em>, for example
-        <code>carboxylic acid</code>. Pick a class from the list; the selected class and its
-        molecule count are shown below the field. Set how many positive and negative
+        Type a ChEBI class name or ID into the search bar, for example
+        <code>carboxylic acid</code>. Pick a class from the list. 
+        Set how many positive and negative
         molecules to take (default 8 each) and click <em>Fill examples</em>.
       </p>
       <p>
@@ -76,13 +76,7 @@
       <p>
         Each molecule card shows its 2D structure. Click a card to open its details: a
         zoomable structure, the ChEBI ID, SMILES, InChI and definition. In the details you
-        can move the molecule to the other column or remove it. Close the dialog with
-        <strong>×</strong>, <kbd>Esc</kbd> or by clicking outside it.
-      </p>
-      <p>
-        The small buttons on a card do the same without opening the dialog: <em>→ −</em> or
-        <em>→ +</em> moves it, and <em>×</em> removes it. You can also drag a card into the
-        other column.
+        can move the molecule to the other column or remove it. 
       </p>
       <figure class="tut-fig">
         <img class="tut-shot tut-shot-narrow" src="static/tutorial/02-molecule-modal.png" alt="Molecule details dialog with move and remove buttons">
@@ -90,8 +84,8 @@
       </figure>
       <p>
         To add your own molecules, paste SMILES or InChI into the text box of a column, one
-        per line, and click <em>Add +</em> (positive) or <em>Add −</em> (negative). Here two
-        negatives (ethanol and ethyl acetate, which are not acids) were added.
+        per line, and click <em>Add +</em> (positive) or <em>Add −</em> (negative). Here, two
+        negatives (ethanol and ethyl acetate) were added.
       </p>
       <figure class="tut-fig">
         <img class="tut-shot" src="static/tutorial/02-examples-after-add.png" alt="Example grids after adding SMILES strings">
@@ -110,17 +104,10 @@
       </p>
       <p>
         Use <em>← + Positive</em> or <em>− Negative →</em> to label the current molecule,
-        or <em>Skip</em> to pass on it. The counter (for example <code>3 / 6</code>) shows
+        or <em>Skip</em> to pass on it. You can also swipe or drag the card: left for
+        positive, right for negative. The counter (for example <code>3 / 6</code>) shows
         your position in the batch. Once a rule exists, each card also shows what the rule
         predicts, so you can confirm or contradict it.
-      </p>
-      <figure class="tut-fig">
-        <img class="tut-shot tut-shot-narrow" src="static/tutorial/03-suggestion-card.png" alt="A suggested molecule card with positive, skip and negative buttons">
-        <figcaption>One suggestion at a time.</figcaption>
-      </figure>
-      <p>
-        In this session the first suggestion was labelled positive and the second negative.
-        The counts in the example grids were updated after each choice.
       </p>
       <figure class="tut-fig">
         <img class="tut-shot" src="static/tutorial/03-suggestions-labelled.png" alt="Suggestion section after labelling two molecules">
@@ -134,20 +121,25 @@
       <p>
         In <em>Learn a rule</em>, choose a method and click <em>Learn rule</em>. The method
         dropdown offers <em>Popper (ILP)</em> and <em>Aleph (ILP)</em>, both of which run on
-        the ICaRuS server; the timeout (default 60 seconds) limits the ILP search. The
-        <em>LLM</em> option sends the concept to an external model and is not used in this
-        tutorial.
+        the ICaRuS server; the timeout (default 60 seconds) limits the ILP search.
+        <a href="https://github.com/logic-and-learning-lab/Popper" target="_blank" rel="noopener">Popper</a>
+        tolerates noise and returns the best rule it finds, while
+        <a href="https://www.cs.ox.ac.uk/activities/programinduction/Aleph/aleph.html" target="_blank" rel="noopener">Aleph</a>
+        looks for a rule that separates the examples cleanly.
       </p>
       <p>
-        While the learner runs, its output streams into the <em>output</em> panel.
-        <em>show full output</em> shows the complete log. When the run finishes, the rule
-        appears below, with a result summary.
+        The <em>LLM</em> option sends the concept name and its definition to a language
+        model (Claude Haiku 5.5), which writes the rule. When you seeded from a ChEBI class, the
+        <em>Concept definition</em> box shows the ChEBI definition, and you can edit it
+        before learning. If the rule library already has a rule for the class, that rule is
+        shown first, and <em>Prompt the LLM</em> asks the model for a fresh one. 
+        Both the ILP learners and the LLM have access to a library of LLM-generated chemical concepts 
+        that they can use as building blocks for new definitions.
       </p>
-      <figure class="tut-fig">
-        <img class="tut-shot" src="static/tutorial/04-learn-output-live.png" alt="Popper output panel while learning">
-        <figcaption>The live output of Popper.</figcaption>
-      </figure>
-      <p>The result shows:</p>
+      <p>
+        When the run finishes, the rule appears below, with a result summary.
+        The result shows:
+      </p>
       <ul>
         <li><strong>Build the rule</strong> — the rule as blocks (the molecule-level property, and atoms with their bonds).</li>
         <li><strong>In words</strong> — a natural-language translation of the rule.</li>
@@ -179,17 +171,15 @@
         You can change the rule in two ways. Drag blocks from the palette onto the molecule
         or an atom in the <em>Rule</em> canvas, or open <em>Advanced: edit as Prolog</em> and
         edit the text directly. Edited Prolog is parsed back into blocks when you click away.
+        Auxiliary predicates (LLM-generated helpers that summarize chemical subconcepts) are listed below
+        the editor and can be edited as Prolog as well.
       </p>
       <p>
-        In this session the rule was one literal, so the edit appended a condition: the
+        In this session the learned rule consisted of one literal, and the manual edit appended a condition: the
         molecule must also contain a nitrogen atom. Click <em>Apply edited rule</em> to run
         the edited rule. Its result becomes a new entry in the history, and ICaRuS lists every
         classification that changed.
       </p>
-      <figure class="tut-fig">
-        <img class="tut-shot" src="static/tutorial/05-advanced-prolog.png" alt="Advanced Prolog editor with an added literal">
-        <figcaption>The edited Prolog. The added part is <code>, has_atom(V0,V1), n(V1)</code>.</figcaption>
-      </figure>
       <figure class="tut-fig">
         <img class="tut-shot" src="static/tutorial/05-applied-edit.png" alt="Rule area after applying an edit, showing new confusion counts and changed classifications">
         <figcaption>After applying the edit: the new counts, the newly misclassified molecules, and the list of changed classifications.</figcaption>

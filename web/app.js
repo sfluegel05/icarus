@@ -124,6 +124,7 @@ function render(state) {
   const neg = state.molecules.filter((m) => m.label === "neg");
 
   renderLlmModel(state.llm_model, state.llm_quota);
+  $("llm-conv-btn").classList.toggle("hidden", !state.llm_runs);
   if (INVITE && state.llm_quota && !state.llm_quota.invited) {
     localStorage.removeItem(INVITE_KEY);
     INVITE = null;
@@ -847,7 +848,9 @@ async function pollLearn(run) {
     learnPoll = null;
     $("learn-btn").disabled = false;
     $("learn-status").textContent = "";
-    $("llm-fresh-btn").classList.toggle("hidden", !p.cached);
+    // Keep it available after every LLM run (cached or fresh) so the user can
+    // request further fresh rules without going back through the cached result.
+    $("llm-fresh-btn").classList.toggle("hidden", p.method !== "llm");
     if (p.error) {
       toast(p.error);
     } else {
@@ -955,18 +958,67 @@ function renderChanges(changed) {
     `<div class="report-box"><h4>${changed.length} classification(s) changed by your edit</h4>${rows}</div>`;
 }
 
-// ── reset ────────────────────────────────────────────────────────────────────
-$("reset-btn").onclick = async () => {
-  const data = await api("api/session/reset", {});
+// ── reset / export / import ────────────────────────────────────────────────
+// Render a state that replaced the whole session (reset or import).
+function renderReplaced(data) {
+  lastRuleSig = null;  // rule ids restart, so force the editor to reload
   render(data);
-  loadPredicates();  // no class any more → no class-specific generated predicates
+  loadPredicates();  // the class (and its generated predicates) may have changed
   queue = []; qIdx = 0;
   $("tinder").classList.add("hidden");
   $("tinder-empty").textContent = "";
   $("change-area").innerHTML = "";
   $("class-search").value = "";
   $("selected-class").textContent = "";
+}
+
+$("reset-btn").onclick = async () => {
+  renderReplaced(await api("api/session/reset", {}));
   toast("Session cleared.");
+};
+
+function download(text, filename, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
+
+// "carboxylic acid" → "icarus-carboxylic-acid-2026-10-15"
+function fileStem(kind) {
+  const name = (lastState?.concept?.name || "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  return ["icarus", kind, name, new Date().toISOString().slice(0, 10)]
+    .filter(Boolean).join("-");
+}
+
+$("export-btn").onclick = async () => {
+  const data = await api("api/session/export");
+  download(JSON.stringify(data, null, 2) + "\n", `${fileStem("")}.json`, "application/json");
+};
+
+$("import-btn").onclick = () => $("import-file").click();
+$("import-file").onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";  // so picking the same file again still fires
+  if (!file) return;
+  let doc;
+  try {
+    doc = JSON.parse(await file.text());
+  } catch {
+    return toast("That file is not valid JSON.");
+  }
+  if (lastState?.molecules.length &&
+      !confirm("Importing replaces the examples, definition and rules of this session. Continue?")) return;
+  const data = await api("api/session/import", doc);
+  renderReplaced(data);
+  toast(data.message);
+};
+
+$("llm-conv-btn").onclick = async () => {
+  const data = await api("api/llm/conversation");
+  download(data.markdown, `${fileStem("llm")}.md`, "text/markdown");
 };
 
 document.addEventListener("keydown", (e) => {

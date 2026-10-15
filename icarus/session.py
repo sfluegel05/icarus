@@ -7,6 +7,7 @@ learned + (optionally) hand-edited hypothesis and the last classification map so
 edits can be diffed.
 """
 
+import datetime
 import itertools
 import math
 import re
@@ -111,6 +112,9 @@ class Session:
         self.learn_lock = threading.Lock()
         self.learn = new_learn_state()
         self.last_used = time.time()
+        # LLM learn runs that prompted the model, with their exchanges (for the
+        # conversation download); the newest MAX_LLM_RUNS are kept.
+        self.llm_runs: list[dict] = []
         # LLM prompts this session has sent (llm_guard's per-session quota). Not reset
         # by clear(), so clearing the session doesn't refill the quota.
         self.llm_prompts = 0
@@ -160,6 +164,21 @@ class Session:
             inchi=_clean(inchi), definition=_clean(definition),
         )
 
+    def add_from_structure(self, s: str, label: str, name: str | None = None) -> Molecule | None:
+        """Parse one SMILES/InChI string and add it (None if it doesn't parse)."""
+        mol = smiles_or_inchi_to_mol(s)
+        if mol is None:
+            return None
+        try:
+            canonical = Chem.MolToSmiles(mol)
+        except Exception:
+            canonical = s
+        try:
+            inchi = Chem.MolToInchi(mol) or None
+        except Exception:
+            inchi = None
+        return self.add_molecule(canonical, name or canonical, None, label, mol, inchi=inchi)
+
     def add_from_text(self, text: str, label: str) -> tuple[list[Molecule], list[str]]:
         """Parse one-or-more SMILES/InChI lines and add them. Returns (added, errors)."""
         added, errors = [], []
@@ -167,20 +186,10 @@ class Session:
             s = raw.strip()
             if not s:
                 continue
-            mol = smiles_or_inchi_to_mol(s)
-            if mol is None:
+            m = self.add_from_structure(s, label)
+            if m is None:
                 errors.append(s)
-                continue
-            try:
-                canonical = Chem.MolToSmiles(mol)
-            except Exception:
-                canonical = s
-            try:
-                inchi = Chem.MolToInchi(mol) or None
-            except Exception:
-                inchi = None
-            m = self.add_molecule(canonical, canonical, None, label, mol, inchi=inchi)
-            if m is not None:
+            else:
                 added.append(m)
         return added, errors
 
@@ -264,6 +273,138 @@ class Session:
         self.concept_name = None
         self.concept_chebi_id = None
         self.concept_definition = None
+        self.llm_runs.clear()
+
+    def add_llm_run(self, run: dict):
+        self.llm_runs.append(run)
+        del self.llm_runs[:-MAX_LLM_RUNS]
+
+    # ── export / import ────────────────────────────────────────────────────
+    def to_export(self) -> dict:
+        """The session as a human-readable, JSON-serialisable document (read back by
+        :meth:`load_export`). Rules are split into lines; the confusion matrices are
+        informational only and are recomputed on import."""
+        def mol(m):
+            d = {"name": m.name} if m.name and m.name != m.smiles else {}
+            if m.chebi_id:
+                d["chebi_id"] = m.chebi_id
+            d["smiles"] = m.smiles
+            return d
+
+        return {
+            "format": EXPORT_FORMAT,
+            "version": EXPORT_VERSION,
+            "exported_at": _iso(time.time()),
+            "concept": {"name": self.concept_name, "chebi_id": self.concept_chebi_id,
+                        "definition": self.concept_definition},
+            "examples": {key: [mol(m) for m in self.molecules.values() if m.label == label]
+                         for key, label in _EXPORT_LABELS.items()},
+            # Oldest first; "selected" marks the rule shown in the editor.
+            "rules": [{
+                "origin": e.origin,
+                "model": e.model,
+                "created_at": _iso(e.created_at),
+                "selected": e.id == self.selected_rule_id,
+                "confusion": e.confusion,
+                "rule": e.rule.splitlines(),
+            } for e in self.rule_history],
+        }
+
+    def load_export(self, doc, max_molecules: int, max_rules: int,
+                    max_definition: int) -> list[str]:
+        """Replace this session's examples, concept and rule history with an exported
+        document. The document is validated first (a ``ValueError`` leaves the session
+        untouched); molecules that can't be resolved are skipped and returned as
+        warnings. Rules are added unscored."""
+        if not isinstance(doc, dict) or doc.get("format") != EXPORT_FORMAT:
+            raise ValueError("Not an ICaRuS session file.")
+        if not isinstance(doc.get("version"), int) or doc["version"] > EXPORT_VERSION:
+            raise ValueError("Unsupported session file version.")
+        concept = doc.get("concept") or {}
+        examples = doc.get("examples") or {}
+        rules = doc.get("rules") or []
+        if not (isinstance(concept, dict) and isinstance(examples, dict)
+                and isinstance(rules, list) and all(isinstance(r, dict) for r in rules)
+                and all(isinstance(examples.get(k) or [], list) for k in _EXPORT_LABELS)):
+            raise ValueError("Malformed session file.")
+        mols = [(label, m) for key, label in _EXPORT_LABELS.items()
+                for m in examples.get(key) or []]
+        if not all(isinstance(m, dict) for _, m in mols):
+            raise ValueError("Malformed session file.")
+        if len(mols) > max_molecules:
+            raise ValueError(f"Too many molecules ({len(mols)}, limit {max_molecules}).")
+        if len(rules) > max_rules:
+            raise ValueError(f"Too many rules ({len(rules)}, limit {max_rules}).")
+        definition = _str_or_none(concept.get("definition"))
+        if definition and len(definition) > max_definition:
+            raise ValueError(f"The concept definition is too long ({len(definition)} "
+                             f"characters, limit {max_definition}).")
+        parsed_rules = []
+        for r in rules:
+            text = r.get("rule")
+            if isinstance(text, list):
+                text = "\n".join(str(line) for line in text)
+            text = _str_or_none(text)
+            if not text:
+                raise ValueError("A rule in the session file is empty.")
+            origin = r.get("origin") if r.get("origin") in RULE_ORIGINS else "edited"
+            model = (_str_or_none(r.get("model")) or "")[:100] or None
+            parsed_rules.append((origin, text, model, _parse_iso(r.get("created_at")),
+                                 bool(r.get("selected"))))
+
+        self.clear()
+        self.concept_name = _str_or_none(concept.get("name"))
+        self.concept_chebi_id = _str_or_none(concept.get("chebi_id"))
+        self.concept_definition = definition
+        skipped = []
+        for label, m in mols:
+            chebi_id = _str_or_none(m.get("chebi_id"))
+            smiles = _str_or_none(m.get("smiles"))
+            name = _str_or_none(m.get("name"))
+            # Prefer the ChEBI entry (brings name, InChI, definition); fall back to the
+            # structure for user-entered molecules or ids missing from this ChEBI version.
+            added = self.add_from_chebi_id(chebi_id, label) if chebi_id else None
+            if added is None and smiles:
+                added = self.add_from_structure(smiles, label, name)
+            if added is None:
+                skipped.append(name or smiles or chebi_id or "?")
+        selected_id = None
+        for origin, text, model, created_at, selected in parsed_rules:
+            entry = self.add_rule(origin, text, model=model)
+            entry.created_at = created_at
+            if selected:
+                selected_id = entry.id
+        if selected_id:
+            self.selected_rule_id = selected_id  # add_rule left the newest selected
+        return skipped
+
+
+MAX_LLM_RUNS = 20
+EXPORT_FORMAT = "icarus-session"
+EXPORT_VERSION = 1
+_EXPORT_LABELS = {"positive": "pos", "negative": "neg", "unlabeled": "unlabeled"}
+RULE_ORIGINS = ("popper", "aleph", "llm", "edited")
+
+
+def _str_or_none(v) -> str | None:
+    if isinstance(v, int) and not isinstance(v, bool):
+        v = str(v)
+    return (v.strip() or None) if isinstance(v, str) else None
+
+
+def _iso(ts: float) -> str:
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(v) -> float:
+    try:
+        dt = datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return time.time()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
 
 
 def new_learn_state(method: str | None = None) -> dict:

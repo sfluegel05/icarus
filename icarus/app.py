@@ -13,6 +13,7 @@ import contextlib
 import functools
 import re
 import threading
+import time
 import traceback
 import types
 
@@ -109,6 +110,8 @@ def state_dict(s: Session) -> dict:
         "llm_model": config.LLM_MODEL_NAME,
         "llm_quota": {"used": s.llm_prompts, "invited": s.invited,
                       "limit": 0 if s.invited else config.LLM_SESSION_LIMIT},
+        # LLM runs that prompted the model (enables the conversation download).
+        "llm_runs": len(s.llm_runs),
         "max_definition_chars": config.MAX_DEFINITION_CHARS,
         "default_timeout": config.DEFAULT_TIMEOUT,
     }
@@ -133,6 +136,8 @@ _MAX_DEPICT_PX = 1000
 _MAX_SUGGEST = 50
 _MAX_CLASS_EXAMPLES = 100
 _MAX_ADD_LINES = 200
+_MAX_IMPORT_MOLECULES = 1000
+_MAX_IMPORT_RULES = 200
 
 
 def ok(s: Session, recompute: bool = True, **extra):
@@ -356,6 +361,56 @@ async def session_reset(request: Request, s: Session):
 
 
 @with_session
+async def session_export(request: Request, s: Session):
+    """The session's examples, concept definition and rule history as a JSON document."""
+    with s.lock:
+        return JSONResponse(s.to_export())
+
+
+@with_session
+async def session_import(request: Request, s: Session):
+    """Replace the session with an exported document (see ``Session.load_export``) and
+    score every imported rule against the imported examples."""
+    try:
+        doc = await request.json()
+    except Exception:
+        return JSONResponse({"error": "The file is not valid JSON."}, status_code=400)
+    with s.learn_lock:
+        if s.learn["running"]:
+            return JSONResponse({"error": "Wait for the running learn to finish first."},
+                                status_code=409)
+    with s.lock:
+        try:
+            skipped = s.load_export(doc, _MAX_IMPORT_MOLECULES, _MAX_IMPORT_RULES,
+                                    config.MAX_DEFINITION_CHARS)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        sig = s.labeled_signature()
+        invalid = 0
+        for e in s.rule_history:
+            e.confusion = _confusion_for_rule(s, e.rule)
+            e.signature = sig
+            invalid += e.confusion is None
+        msg = (f"Imported {len(s.molecules)} molecule(s) and "
+               f"{len(s.rule_history)} rule(s).")
+        if skipped:
+            msg += f" Could not load: {', '.join(skipped[:5])}" + (" …" if len(skipped) > 5 else "")
+        if invalid:
+            msg += f" {invalid} rule(s) could not be evaluated."
+        return ok(s, message=msg)
+
+
+@with_session
+async def llm_conversation(request: Request, s: Session):
+    """A Markdown transcript of the session's LLM prompts and the model's answers."""
+    with s.lock:
+        runs = list(s.llm_runs)
+    if not runs:
+        return JSONResponse({"error": "No LLM prompts in this session yet."}, status_code=404)
+    return JSONResponse({"markdown": llm_guard.conversation_markdown(runs)})
+
+
+@with_session
 async def concept_definition(request: Request, s: Session):
     """Update the editable concept definition passed to the LLM pipeline."""
     body = await request.json()
@@ -420,14 +475,22 @@ def _learn_worker(s, pos, neg, timeout, method, concept, log_fields, use_cache=T
         with s.learn_lock:
             s.learn["lines"].append(line)
 
+    # The model calls of this run, kept on the session for the conversation download.
+    llm_run = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "concept": concept.get("name"),
+               "model": config.LLM_MODEL_NAME, "n_pos": len(pos), "n_neg": len(neg),
+               "exchanges": []}
     try:
-        with llm_guard.context(**log_fields):
+        with llm_guard.context(**log_fields), llm_guard.recording(llm_run["exchanges"]):
             result = ilp.learn_dispatch(method, pos, neg, timeout, on_line,
                                         model=config.LLM_MODEL, concept=concept,
                                         admit=lambda: llm_guard.admit(s),
                                         use_cache=use_cache)
     except Exception as e:
         traceback.print_exc()
+        if llm_run["exchanges"]:
+            llm_run["outcome"] = f"failed: {e}"
+            with s.lock:
+                s.add_llm_run(llm_run)
         with s.learn_lock:
             s.learn.update(running=False, done=True, error=str(e))
         return
@@ -436,6 +499,11 @@ def _learn_worker(s, pos, neg, timeout, method, concept, log_fields, use_cache=T
 
     rule = result.get("rule")
     with s.lock:
+        if llm_run["exchanges"]:
+            llm_run["rule"] = rule
+            llm_run["outcome"] = ("rule learned" if rule else
+                                  result.get("error") or "no rule found")
+            s.add_llm_run(llm_run)
         if rule:
             # Name the model that wrote an LLM rule (a cached library rule was written
             # earlier, possibly by another model).
@@ -595,6 +663,9 @@ routes = [
     Route("/api/session/set_label", session_set_label, methods=["POST"]),
     Route("/api/session/remove", session_remove, methods=["POST"]),
     Route("/api/session/reset", session_reset, methods=["POST"]),
+    Route("/api/session/export", session_export),
+    Route("/api/session/import", session_import, methods=["POST"]),
+    Route("/api/llm/conversation", llm_conversation),
     Route("/api/concept/definition", concept_definition, methods=["POST"]),
     Route("/api/suggest", suggest, methods=["POST"]),
     Route("/api/suggest/accept", suggest_accept, methods=["POST"]),

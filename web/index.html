@@ -19,6 +19,9 @@
     </div>
     <div class="navbar-right">
       <span id="counts" class="counts"></span>
+      <button id="export-btn" class="ghost" title="Download the examples, concept definition and rule history as a JSON file">Export session</button>
+      <button id="import-btn" class="ghost" title="Replace this session with a previously exported JSON file">Import session</button>
+      <input id="import-file" type="file" accept=".json,application/json" class="hidden">
       <button id="reset-btn" class="ghost">Reset session</button>
     </div>
   </header>
@@ -123,8 +126,10 @@
         <label class="mini" id="timeout-wrap">timeout&nbsp;s <input id="timeout" type="number" value="60" min="5" max="120"></label>
         <button id="learn-btn">Learn rule</button>
         <button id="llm-fresh-btn" class="ghost hidden"
-                title="The rule above was loaded from the rule library. Prompt the LLM for a fresh rule from your current examples and definition.">Prompt the LLM</button>
+                title="Prompt the LLM for a fresh rule from your current examples and definition (bypasses the rule library's cached rule).">Prompt the LLM</button>
         <span id="learn-status" class="muted"></span>
+        <button id="llm-conv-btn" class="ghost hidden"
+                title="Download every prompt this session sent to the LLM, with the model's answers (Markdown)">Download LLM conversation</button>
       </div>
 
       <div id="learn-progress" class="learn-progress hidden">

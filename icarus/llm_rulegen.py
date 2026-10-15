@@ -76,7 +76,8 @@ class _StreamToLog(io.TextIOBase):
         self._buf += s
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
-            if line.strip():
+            # The pipeline's server-side log path means nothing to a user.
+            if line.strip() and "logged full exchange to" not in line:
                 self._on_line(line)
         return len(s)
 

@@ -22,6 +22,7 @@ import hmac
 import json
 import math
 import os
+import re
 import threading
 import time
 
@@ -106,7 +107,21 @@ def context(**fields):
         _ctx.fields = {}
 
 
+@contextlib.contextmanager
+def recording(exchanges: list):
+    """Append each model call this thread makes (its log record) to ``exchanges``,
+    so the session can offer the conversation for download."""
+    _ctx.exchanges = exchanges
+    try:
+        yield
+    finally:
+        _ctx.exchanges = None
+
+
 def _log(record: dict) -> None:
+    exchanges = getattr(_ctx, "exchanges", None)
+    if exchanges is not None:
+        exchanges.append(record)
     os.makedirs(os.path.dirname(config.LLM_PROMPT_LOG), exist_ok=True)
     line = json.dumps(record, ensure_ascii=False, default=str)
     with _log_lock, open(config.LLM_PROMPT_LOG, "a", encoding="utf-8") as fh:
@@ -205,6 +220,10 @@ def _call_with_deadline(model, system, prompt, schema, **kwargs):
                      + ("." if "result" in box else " (with an error)."))
     if "error" in box:
         raise box["error"]
+    if p:
+        reasoning = (getattr(box["result"][0], "reasoning", "") or "").strip()
+        if reasoning:
+            p["on_line"](f"Model reasoning: {' '.join(reasoning.split())}")
     return box["result"]
 
 
@@ -242,3 +261,57 @@ def install() -> None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("llm_guard: ICARUS_LLM_AUTH=api_key but ANTHROPIC_API_KEY is not set")
         llm_client._drop_api_key_auth = lambda: None
+
+
+# ── conversation export ────────────────────────────────────────────────────
+def _fenced(text: str, lang: str = "") -> str:
+    """``text`` in a code fence longer than any backtick run inside it."""
+    longest = max((len(r) for r in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{lang}\n{text.rstrip()}\n{fence}\n"
+
+
+def _response_markdown(raw) -> str:
+    """The model's structured answer, one section per field, so multi-line strings
+    (reasoning, Prolog) read as text rather than escaped JSON."""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return _fenced(str(raw))
+    if not isinstance(data, dict):
+        return _fenced(json.dumps(data, ensure_ascii=False, indent=2), "json")
+    parts = []
+    for key, value in data.items():
+        parts.append(f"#### `{key}`\n\n")
+        if isinstance(value, str):
+            parts.append(_fenced(value))
+        else:
+            parts.append(_fenced(json.dumps(value, ensure_ascii=False, indent=2), "json"))
+        parts.append("\n")
+    return "".join(parts)
+
+
+def conversation_markdown(runs: list[dict]) -> str:
+    """A readable transcript of a session's LLM learn runs (see ``app._learn_worker``):
+    per model call the system prompt, the prompt and the model's answer."""
+    out = ["# ICaRuS — LLM conversation\n\n"]
+    for i, run in enumerate(runs, 1):
+        concept = run.get("concept") or "unnamed concept"
+        out.append(f"## Run {i}: {concept}\n\n- Started: {run['started']}\n"
+                   f"- Model: {run.get('model') or 'unknown'}\n"
+                   f"- Examples: {run['n_pos']} positive, {run['n_neg']} negative\n")
+        if run.get("outcome"):
+            out.append(f"- Outcome: {run['outcome']}\n")
+        out.append("\n")
+        for j, ex in enumerate(run["exchanges"], 1):
+            cost = f", ${ex['cost_usd']:.4f}" if ex.get("cost_usd") else ""
+            out.append(f"### Call {j} ({ex.get('time', '')}{cost})\n\n")
+            out.append("#### System prompt\n\n" + _fenced(ex.get("system") or "") + "\n")
+            out.append("#### Prompt\n\n" + _fenced(ex.get("prompt") or "") + "\n")
+            if ex.get("error"):
+                out.append(f"**Error:** {ex['error']}\n\n")
+            if ex.get("response") is not None:
+                out.append("### Response\n\n" + _response_markdown(ex["response"]))
+        if run.get("rule"):
+            out.append("### Resulting rule\n\n" + _fenced(run["rule"], "prolog") + "\n")
+    return "".join(out)

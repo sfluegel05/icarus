@@ -9,6 +9,7 @@ drives the whole flow:
   5. iterate: add samples, re-suggest, re-learn
 """
 
+import asyncio
 import contextlib
 import functools
 import re
@@ -287,12 +288,30 @@ async def api_predicates(request: Request, s: Session):
         rule = s.current_rule
     return JSONResponse({
         "catalog": predicates.catalog(),
-        "aux": predicates.aux_blocks(config.LLM_LIBRARY_DIR,
-                                     names=_class_aux_names(concept, rule),
-                                     rule_descriptions=ilp.rule_aux_descriptions(rule),
-                                     rule=rule),
+        "aux": _with_class_names(predicates.aux_blocks(
+            config.LLM_LIBRARY_DIR, names=_class_aux_names(concept, rule),
+            rule_descriptions=ilp.rule_aux_descriptions(rule), rule=rule)),
         "target": config.TARGET_LABEL,
     })
+
+
+def _with_class_names(blocks: list[dict]) -> list[dict]:
+    """Name the ChEBI class each generated predicate was made for (block tooltip)."""
+    for b in blocks:
+        if b.get("chebi_id"):
+            b["chebi_name"] = data_store.class_name(b["chebi_id"])
+    return blocks
+
+
+async def api_predicates_search(request: Request):
+    """Search ALL generated predicates in the library, not only the ones relevant to
+    the session's class (those come with ``/api/predicates``)."""
+    q = request.query_params.get("q", "")[:200]
+    limit = _int(request.query_params.get("limit"), 50, 1, 200)
+    offset = _int(request.query_params.get("offset"), 0, 0, 1_000_000)
+    blocks, total = await asyncio.to_thread(
+        predicates.search_aux_blocks, config.LLM_LIBRARY_DIR, q, limit, offset)
+    return JSONResponse({"results": _with_class_names(blocks), "total": total})
 
 
 async def classes_search(request: Request):
@@ -657,6 +676,7 @@ routes = [
     Route("/api/explain", explain),
     Route("/api/state", api_state),
     Route("/api/predicates", api_predicates),
+    Route("/api/predicates/search", api_predicates_search),
     Route("/api/classes/search", classes_search),
     Route("/api/session/from_class", session_from_class, methods=["POST"]),
     Route("/api/session/add", session_add, methods=["POST"]),
@@ -693,13 +713,15 @@ async def _lifespan(app):
         # loop stays responsive) so class autocomplete works from the first
         # keystroke instead of triggering a ~10s graph load and transitive-closure
         # computation on first search.
-        import asyncio
 
         async def _warm():
             try:
                 await asyncio.to_thread(data_store.graph)
                 await asyncio.to_thread(data_store.molecules)
                 await asyncio.to_thread(data_store.transitive_closure)
+                # Generated-predicate index (palette + search): reads every library
+                # program and generation log once.
+                await asyncio.to_thread(predicates.aux_index, config.LLM_LIBRARY_DIR)
                 print("[ICaRuS] reference data preloaded.", flush=True)
             except Exception as exc:  # pragma: no cover - best-effort warmup
                 print(f"[ICaRuS] warmup failed: {exc}", flush=True)

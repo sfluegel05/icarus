@@ -197,6 +197,11 @@ label { font-size: 12px; color: var(--muted); }
   border: 1px solid var(--border); border-radius: 8px; background: #fbfcfd;
   padding: 8px; max-height: 460px; overflow-y: auto;
 }
+.palette-search { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.palette-search .ps-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 4px 6px; }
+.palette-search .ps-status { font-size: 11px; color: var(--muted); margin: 4px 2px; }
+.palette-search .ps-status:empty { display: none; }
+.palette-search .ps-results { max-height: 220px; overflow-y: auto; }
 .palette-group-title { font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--muted); font-weight: 700; margin: 8px 2px 5px; }
 .palette-popular .palette-group-title { margin-top: 2px; }

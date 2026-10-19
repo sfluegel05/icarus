@@ -26,6 +26,8 @@ they exist in the session rule library, so a generated concept becomes a reusabl
 building block.
 """
 
+import functools
+import json
 import os
 import re
 
@@ -345,6 +347,114 @@ def _aux_head_arity(program_path: str) -> int | None:
     return 0 if not args else len([a for a in args.split(",") if a.strip()])
 
 
+_ID_SUFFIX_RE = re.compile(r"_(\d{4,})$")
+_LOG_NAME_RE = re.compile(r"^chebi_(\d+)\.md$")
+_LOG_TIME_RE = re.compile(r"^- Timestamp:\s*(.+?)\s*$", re.MULTILINE)
+_LOG_NEW_RE = re.compile(r"^- New rules added:\n((?:[ \t]+- .*\n?)+)", re.MULTILINE)
+
+
+def _origins(library_dir: str) -> dict[str, str]:
+    """``aux_name -> ChEBI id`` of the class each library predicate was first
+    generated for: the earliest generation log listing it as a new rule, falling
+    back to the first class in ``class_map.json`` that uses it. (A ``_<id>`` name
+    suffix overrides this, see :func:`_origin`.)"""
+    first_seen: dict[str, tuple[str, str]] = {}
+    logs = os.path.join(library_dir, "generation_logs")
+    if os.path.isdir(logs):
+        for fname in os.listdir(logs):
+            m = _LOG_NAME_RE.match(fname)
+            if not m:
+                continue
+            try:
+                with open(os.path.join(logs, fname), encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            new = _LOG_NEW_RE.search(text)
+            if not new:
+                continue
+            t = _LOG_TIME_RE.search(text)
+            seen = (t.group(1) if t else "~", m.group(1))  # undated logs sort last
+            for name in re.findall(r"`(aux_\w+)`", new.group(1)):
+                if name not in first_seen or seen < first_seen[name]:
+                    first_seen[name] = seen
+    origins = {n: cid for n, (_, cid) in first_seen.items()}
+    try:
+        with open(os.path.join(library_dir, "class_map.json"), encoding="utf-8") as f:
+            for cid, names in json.load(f).items():
+                for n in names:
+                    origins.setdefault(n, str(cid))
+    except (OSError, ValueError):
+        pass
+    return origins
+
+
+def _origin(name: str, origins: dict[str, str]) -> str | None:
+    # A ``_<id>`` suffix is the generator's own disambiguation of a name clash.
+    m = _ID_SUFFIX_RE.search(name)
+    return m.group(1) if m else origins.get(name)
+
+
+@functools.lru_cache(maxsize=4)
+def aux_index(library_dir: str) -> tuple[dict, dict]:
+    """Every predicate of the (read-only) library, loaded once:
+    ``({name: (description, arity, label, origin_chebi_id)}, {label: count})``.
+    Several predicates share a readable label (``aux_acyclic_molecule`` and
+    ``aux_acyclic_molecule_10283`` both read "acyclic molecule"); the counts mark
+    the labels that need the ChEBI id to tell them apart."""
+    try:
+        from chebILP.explainability.rule_to_nl import load_aux_descriptions, _format_aux_name
+    except Exception:
+        return {}, {}
+    if not (library_dir and os.path.isdir(library_dir)):
+        return {}, {}
+    programs_dir = os.path.join(library_dir, "programs")
+    if not os.path.isdir(programs_dir):
+        programs_dir = library_dir
+
+    def arity(name):
+        for ext in (".pl", ".py"):
+            path = os.path.join(programs_dir, name + ext)
+            if os.path.exists(path):
+                return _aux_head_arity(path) if ext == ".pl" else None
+        return None
+
+    origins = _origins(library_dir)
+    entries, counts = {}, {}
+    for name, desc in load_aux_descriptions(library_dir).items():
+        label = _format_aux_name(name) or name
+        entries[name] = (desc or "", arity(name), label, _origin(name, origins))
+        counts[label] = counts.get(label, 0) + 1
+    return entries, counts
+
+
+def _aux_block(name, desc, arity, label, chebi_id, ambiguous) -> dict:
+    """Palette block for one generated predicate. ``ambiguous``: its readable label
+    is shared with another predicate, so the label carries the ChEBI id of the class
+    it was generated for."""
+    if ambiguous and chebi_id:
+        label = f"{label} (CHEBI:{chebi_id})"
+    # An arity-1 generated predicate may hold of the molecule OR of a single
+    # atom — the arity alone doesn't say which — so scope "any" lets the user
+    # drop it onto the molecule area or an atom, wherever it belongs. Arity-2
+    # is a relation between two atoms (drawn with the bond/connect handle).
+    if arity == 2:
+        scope, nl = "bond", f"forms “{label}” with"
+    else:
+        scope, nl = "any", f"has the property “{label}”"
+    return {
+        "id": f"aux_{name}",
+        "category": "Generated (LLM)",
+        "scope": scope,
+        "popular": False,
+        "label": label,
+        "nl": nl,
+        "description": desc or "",
+        "chebi_id": chebi_id,
+        "input": {"type": "toggle", "pred": name},
+    }
+
+
 def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) -> list[dict]:
     """Blocks for the LLM-generated ``aux_*`` predicates in the session library,
     restricted to ``names`` when given (``None`` = the whole library), plus those the
@@ -359,28 +469,13 @@ def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) 
     role, so a rule always round-trips regardless of this hint.
     """
     try:
-        from chebILP.explainability.rule_to_nl import (
-            load_aux_descriptions, _format_aux_name,
-        )
+        from chebILP.explainability.rule_to_nl import _format_aux_name
     except Exception:
         return []
 
-    has_library = bool(library_dir) and os.path.isdir(library_dir)
-    descriptions = load_aux_descriptions(library_dir) if has_library else {}
-    if names is not None:
-        descriptions = {n: d for n, d in descriptions.items() if n in names}
-    from_rule = {n: d for n, d in (rule_descriptions or {}).items() if n not in descriptions}
-
-    programs_dir = os.path.join(library_dir, "programs") if has_library else ""
-    if has_library and not os.path.isdir(programs_dir):
-        programs_dir = library_dir
-
-    def library_arity(name):
-        for ext in (".pl", ".py"):
-            path = os.path.join(programs_dir, name + ext)
-            if os.path.exists(path):
-                return _aux_head_arity(path) if ext == ".pl" else None
-        return None
+    entries, counts = aux_index(library_dir)
+    counts = dict(counts)
+    chosen = [(n, *e) for n, e in entries.items() if names is None or n in names]
 
     def rule_arity(name):
         for m in _HEAD_ARITY_RE.finditer(rule or ""):
@@ -389,28 +484,39 @@ def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) 
                 return 0 if not args else len([a for a in args.split(",") if a.strip()])
         return None
 
+    for n, d in (rule_descriptions or {}).items():
+        if n in entries:
+            continue
+        label = _format_aux_name(n) or n
+        counts[label] = counts.get(label, 0) + 1
+        m = _ID_SUFFIX_RE.search(n)
+        chosen.append((n, d, rule_arity(n), label, m.group(1) if m else None))
+
+    return [_aux_block(n, d, a, label, cid, counts.get(label, 0) > 1)
+            for n, d, a, label, cid in sorted(chosen)]
+
+
+def search_aux_blocks(library_dir: str, query: str, limit: int = 50,
+                      offset: int = 0) -> tuple[list[dict], int]:
+    """Search the WHOLE generated-predicate library (not just the predicates
+    relevant to the session's class). Every whitespace-separated term must occur in
+    the predicate name, readable label, description or origin ChEBI id; an empty
+    query lists everything. Label matches rank before description-only matches.
+    Returns ``(blocks[offset:offset+limit], total)``."""
+    entries, counts = aux_index(library_dir)
+    terms = (query or "").lower().replace("chebi:", "").split()
+    q = " ".join(terms)
+    hits = []
+    for name, (desc, _, label, cid) in entries.items():
+        low_name, low_label = name.lower(), label.lower()
+        if not all(t in f"{low_name} {low_label} {desc.lower()} {cid or ''}" for t in terms):
+            continue
+        rank = (0 if low_label.startswith(q) else
+                1 if all(t in low_label or t in low_name for t in terms) else 2)
+        hits.append((rank, low_label, name))
+    hits.sort()
     blocks = []
-    for name, desc, arity in sorted(
-            [(n, d, library_arity(n)) for n, d in descriptions.items()]
-            + [(n, d, rule_arity(n)) for n, d in from_rule.items()]):
-        arity = arity if arity in (1, 2) else 1
-        label = _format_aux_name(name) or name
-        # An arity-1 generated predicate may hold of the molecule OR of a single
-        # atom — the arity alone doesn't say which — so scope "any" lets the user
-        # drop it onto the molecule area or an atom, wherever it belongs. Arity-2
-        # is a relation between two atoms (drawn with the bond/connect handle).
-        if arity == 2:
-            scope, nl = "bond", f"forms “{label}” with"
-        else:
-            scope, nl = "any", f"has the property “{label}”"
-        blocks.append({
-            "id": f"aux_{name}",
-            "category": "Generated (LLM)",
-            "scope": scope,
-            "popular": False,
-            "label": label,
-            "nl": nl,
-            "description": desc or "",
-            "input": {"type": "toggle", "pred": name},
-        })
-    return blocks
+    for _, _, n in hits[offset:offset + limit]:
+        desc, arity, label, cid = entries[n]
+        blocks.append(_aux_block(n, desc, arity, label, cid, counts[label] > 1))
+    return blocks, len(hits)

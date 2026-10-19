@@ -1032,6 +1032,7 @@ document.addEventListener("keydown", (e) => {
 Blocks.init({
   palette: $("block-palette"),
   canvas: $("block-canvas"),
+  searchAux: (q, offset) => api(`api/predicates/search?q=${encodeURIComponent(q)}&offset=${offset}`),
   onChange: () => {
     // A block edit: mark dirty and mirror the compiled Prolog into the advanced box.
     editorDirty = true;

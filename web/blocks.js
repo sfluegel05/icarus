@@ -51,9 +51,12 @@
     if (pred === "aromatic" || pred === "aliphatic") return { label: pred, scope: "molecule" };
     if ((m = /^net_charge_(\w+)$/.exec(pred))) return { label: "net " + m[1], scope: "molecule" };
 
-    // aux_* or anything unrecognised → humanised name (drop aux_ + id suffix).
+    // aux_* or anything unrecognised → humanised name (drop aux_). A ChEBI-id
+    // suffix disambiguates same-named generated predicates, so keep it readable.
     let name = pred.startsWith("aux_") ? pred.slice(4) : pred;
+    const id = /_(\d{4,})$/.exec(name);
     name = name.replace(/_\d{4,}$/, "").replace(/_/g, " ").trim();
+    if (name && id) name += ` (CHEBI:${id[1]})`;
     return { label: name || pred, scope: "molecule" };
   }
 
@@ -286,6 +289,7 @@
       this.paletteEl = opts.palette;
       this.canvasEl = opts.canvas;
       this.onChangeCb = opts.onChange || null;
+      this.searchAuxCb = opts.searchAux || null;  // (q, offset) → {results, total}
       this.canvasEl.addEventListener("click", (e) => this.onCanvasClick(e));
       this.renderCanvas();
     },
@@ -294,12 +298,7 @@
       this.catalog = catalog || [];
       this.aux = aux || [];
       if (target) TARGET = target;
-      // Register readable labels for every ground predicate the catalog names.
-      for (const b of [...this.catalog, ...this.aux]) {
-        const inp = b.input || {};
-        if (inp.type === "toggle" && inp.pred) LABELS[inp.pred] = b.label;
-        if (inp.type === "choice") (inp.options || []).forEach((o) => { LABELS[o.pred] = b.label + ": " + o.label; });
-      }
+      this.registerLabels([...this.catalog, ...this.aux]);
       // Element symbols → nice names.
       for (const b of this.catalog) {
         if (b.category === "Element" && b.input && b.input.type === "toggle") {
@@ -307,6 +306,15 @@
         }
       }
       this.renderPalette();
+    },
+
+    // Register readable labels for every ground predicate the blocks name.
+    registerLabels(blocks) {
+      for (const b of blocks) {
+        const inp = b.input || {};
+        if (inp.type === "toggle" && inp.pred) LABELS[inp.pred] = b.label;
+        if (inp.type === "choice") (inp.options || []).forEach((o) => { LABELS[o.pred] = b.label + ": " + o.label; });
+      }
     },
 
     changed() {
@@ -352,6 +360,7 @@
         if (!groups[b.category]) { groups[b.category] = []; order.push(b.category); }
         groups[b.category].push(b);
       }
+      if (this.searchAuxCb) el.appendChild(this.auxSearchBox());
       const popular = all.filter((b) => b.popular);
       if (popular.length) {
         const row = document.createElement("div");
@@ -380,6 +389,50 @@
       el.appendChild(more);
     },
 
+    // Search over ALL generated predicates in the library — the palette group only
+    // lists those relevant to the current class. The query survives palette
+    // re-renders (the catalog is reloaded whenever the class or rule changes).
+    auxSearchBox() {
+      const box = document.createElement("div");
+      box.className = "palette-search";
+      box.innerHTML = `<input type="search" class="ps-input" placeholder="Search all generated predicates…"
+        aria-label="Search all LLM-generated predicates">
+        <div class="ps-status"></div><div class="palette-blocks ps-results"></div>`;
+      const input = box.querySelector(".ps-input");
+      const status = box.querySelector(".ps-status");
+      const results = box.querySelector(".ps-results");
+      input.value = this.searchQuery || "";
+      let timer = null, seq = 0, shown = 0;
+
+      const run = async (append) => {
+        const q = input.value.trim();
+        this.searchQuery = q;
+        const my = ++seq;
+        if (!q) { results.innerHTML = ""; status.textContent = ""; shown = 0; return; }
+        if (!append) shown = 0;
+        status.textContent = "Searching…";
+        let data;
+        try { data = await this.searchAuxCb(q, shown); } catch (e) { status.textContent = ""; return; }
+        if (my !== seq) return;  // a newer query superseded this one
+        if (!append) results.innerHTML = "";
+        this.registerLabels(data.results);
+        data.results.forEach((b) => results.appendChild(this.paletteBlock(b)));
+        shown += data.results.length;
+        status.innerHTML = "";
+        status.append(data.total ? `${shown} of ${data.total} match${data.total === 1 ? "" : "es"}` : "No matches");
+        if (shown < data.total) {
+          const more = document.createElement("button");
+          more.className = "linkbtn ps-more";
+          more.textContent = "show more";
+          more.onclick = () => run(true);
+          status.append(" · ", more);
+        }
+      };
+      input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => run(false), 250); });
+      if (input.value) run(false);
+      return box;
+    },
+
     // Build one palette block element. Returns the ground predicate via getPred().
     paletteBlock(b) {
       const div = document.createElement("div");
@@ -394,8 +447,14 @@
       } else if (inp.type === "element") {
         control = `<input class="pb-element" type="text" maxlength="2" placeholder="e.g. Cl" size="3">`;
       }
+      let info = b.description || "";
+      if (b.chebi_id) {
+        info += (info ? "\n" : "") + `Generated for CHEBI:${b.chebi_id}` +
+          (b.chebi_name && b.chebi_name !== "CHEBI:" + b.chebi_id ? ` (${b.chebi_name})` : "");
+      }
+      if (b.input && b.input.type === "toggle" && b.input.pred.startsWith("aux_")) info += `\n${b.input.pred}`;
       div.innerHTML = `<span class="pb-label">${escapeHtml(b.label)}</span>${control}` +
-        (b.description ? `<span class="pb-desc" title="${escapeHtml(b.description)}">ⓘ</span>` : "");
+        (info ? `<span class="pb-desc" title="${escapeHtml(info.trim())}">ⓘ</span>` : "");
 
       const getPred = () => {
         if (inp.type === "toggle") return inp.pred;

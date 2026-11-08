@@ -161,6 +161,12 @@ function render(state) {
       syncAdvancedFromBlocks(true);
     }
     $("rule-nl").textContent = parts.main.nl || "—";
+    // A hypothesis that only called one auxiliary predicate is shown with that
+    // predicate's definition inlined (server-side, see ilp.rule_to_nl_parts).
+    const unfolded = parts.main.unfolded || [];
+    $("rule-unfolded").textContent = unfolded.length
+      ? `Shown with the definition of ${unfolded.join(", ")} inlined.` : "";
+    $("rule-unfolded").classList.toggle("hidden", !unfolded.length);
     renderAux(parts.aux || []);
     renderReport(state.report);
     updateEditedFlag();
@@ -795,6 +801,14 @@ $("learn-method").addEventListener("change", () => {
   if ($("learn-method").value !== "llm") $("llm-fresh-btn").classList.add("hidden");
 });
 
+// Learn settings (library predicate kinds), remembered in this browser.
+for (const id of ["use-aux", "use-efg"]) {
+  const saved = localStorage.getItem(`icarus.${id}`);
+  if (saved !== null) $(id).checked = saved === "1";
+  $(id).addEventListener("change", () =>
+    localStorage.setItem(`icarus.${id}`, $(id).checked ? "1" : "0"));
+}
+
 $("learn-btn").onclick = () => startLearn(false);
 // Shown after the LLM method served a cached library rule: really prompt the model.
 $("llm-fresh-btn").onclick = () => startLearn(true);
@@ -811,7 +825,8 @@ async function startLearn(fresh) {
   $("learn-full").textContent = "";
   revealEnd($("learn-progress"));
   try {
-    await api("api/learn", { method, timeout: parseInt($("timeout").value), fresh });
+    await api("api/learn", { method, timeout: parseInt($("timeout").value), fresh,
+                             use_aux: $("use-aux").checked, use_efg: $("use-efg").checked });
   } catch (err) {
     $("learn-status").textContent = "";
     $("learn-btn").disabled = false;

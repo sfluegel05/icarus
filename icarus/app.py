@@ -24,7 +24,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 
-from . import config, data_store, ilp, llm_guard, predicates, render, similarity
+from . import config, data_store, efg, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
 
 
@@ -251,13 +251,16 @@ async def api_state(request: Request, s: Session):
         return ok(s)  # ok() refreshes predictions when a rule exists
 
 
-def _class_aux_names(concept, rule) -> set[str]:
-    """Library predicates relevant to the session's class: those retrieved for its
-    definition (the same retrieval that augments the ILP background), the class's
+def _class_library_names(concept, rule) -> tuple[set[str], set[str]]:
+    """``(aux names, efg names)`` relevant to the session's class: those retrieved for
+    its definition (the same retrieval that augments the ILP background), the class's
     own generated predicates plus their dependencies, and any used by ``rule``."""
     names = set(re.findall(r"\baux_[A-Za-z0-9_]*", rule or ""))
+    groups = set(efg.referenced(rule or ""))
     try:
-        names |= {p.name for p in ilp.retrieve_library_programs(concept)}
+        programs, retrieved_groups = ilp.retrieve_library_predicates(concept)
+        names |= {p.name for p in programs}
+        groups |= set(retrieved_groups)
     except Exception:
         traceback.print_exc()
     if concept.get("chebi_id"):
@@ -274,7 +277,7 @@ def _class_aux_names(concept, rule) -> set[str]:
             pass
         except Exception:
             traceback.print_exc()
-    return names
+    return names, groups
 
 
 @with_session
@@ -286,11 +289,13 @@ async def api_predicates(request: Request, s: Session):
         concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
                    "definition": s.concept_definition}
         rule = s.current_rule
+    names, groups = _class_library_names(concept, rule)
     return JSONResponse({
         "catalog": predicates.catalog(),
         "aux": _with_class_names(predicates.aux_blocks(
-            config.LLM_LIBRARY_DIR, names=_class_aux_names(concept, rule),
-            rule_descriptions=ilp.rule_aux_descriptions(rule), rule=rule)),
+            config.LLM_LIBRARY_DIR, names=names,
+            rule_descriptions=ilp.rule_aux_descriptions(rule), rule=rule))
+               + predicates.efg_blocks(groups),
         "target": config.TARGET_LABEL,
     })
 
@@ -569,7 +574,10 @@ async def learn(request: Request, s: Session):
         pos = s.positives()
         neg = [m for m in s.molecules.values() if m.label == "neg"]
         concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
-                   "definition": s.concept_definition}
+                   "definition": s.concept_definition,
+                   # Settings: which library predicates the learner may build on.
+                   "use_aux": body.get("use_aux") is not False,
+                   "use_efg": body.get("use_efg") is not False}
     if not pos or not neg:
         return JSONResponse(
             {"error": "Need at least one positive and one negative example."}, status_code=400)

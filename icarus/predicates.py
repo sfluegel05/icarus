@@ -496,27 +496,62 @@ def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) 
             for n, d, a, label, cid in sorted(chosen)]
 
 
+def _efg_label(name: str, desc: str) -> str:
+    # The description starts with the EFG group's own name ("Carboxylic acids: …").
+    return desc.split(":", 1)[0].strip() if desc else name[len("efg_"):].replace("_", " ")
+
+
+def _efg_block(name: str, desc: str) -> dict:
+    """Palette block for one Extended Functional Group (molecule-level presence)."""
+    label = _efg_label(name, desc)
+    return {
+        "id": f"efg_{name}",
+        "category": "Functional groups (EFG)",
+        "scope": "molecule",
+        "popular": False,
+        "label": label,
+        "nl": f"contains the functional group “{label}”",
+        "description": desc.split(":", 1)[1].strip() if ":" in desc else desc,
+        "input": {"type": "toggle", "pred": name},
+    }
+
+
+def efg_blocks(names) -> list[dict]:
+    """Blocks for the given ``efg_*`` predicates (unknown names are skipped)."""
+    from . import efg
+
+    descs = efg.descriptions()
+    return [_efg_block(n, descs[n]) for n in sorted(set(names)) if n in descs]
+
+
 def search_aux_blocks(library_dir: str, query: str, limit: int = 50,
                       offset: int = 0) -> tuple[list[dict], int]:
     """Search the WHOLE generated-predicate library (not just the predicates
-    relevant to the session's class). Every whitespace-separated term must occur in
-    the predicate name, readable label, description or origin ChEBI id; an empty
-    query lists everything. Label matches rank before description-only matches.
-    Returns ``(blocks[offset:offset+limit], total)``."""
+    relevant to the session's class) and the Extended Functional Groups. Every
+    whitespace-separated term must occur in the predicate name, readable label,
+    description or origin ChEBI id; an empty query lists everything. Label matches
+    rank before description-only matches. Returns ``(blocks[offset:offset+limit], total)``."""
+    from . import efg
+
     entries, counts = aux_index(library_dir)
     terms = (query or "").lower().replace("chebi:", "").split()
     q = " ".join(terms)
     hits = []
-    for name, (desc, _, label, cid) in entries.items():
+    candidates = [(n, desc, label, cid) for n, (desc, _, label, cid) in entries.items()]
+    candidates += [(n, d, _efg_label(n, d), None) for n, d in efg.vocabulary()]
+    for name, desc, label, cid in candidates:
         low_name, low_label = name.lower(), label.lower()
         if not all(t in f"{low_name} {low_label} {desc.lower()} {cid or ''}" for t in terms):
             continue
         rank = (0 if low_label.startswith(q) else
                 1 if all(t in low_label or t in low_name for t in terms) else 2)
-        hits.append((rank, low_label, name))
+        hits.append((rank, low_label, name, desc))
     hits.sort()
     blocks = []
-    for _, _, n in hits[offset:offset + limit]:
-        desc, arity, label, cid = entries[n]
-        blocks.append(_aux_block(n, desc, arity, label, cid, counts[label] > 1))
+    for _, _, n, desc in hits[offset:offset + limit]:
+        if n in entries:
+            desc, arity, label, cid = entries[n]
+            blocks.append(_aux_block(n, desc, arity, label, cid, counts[label] > 1))
+        else:
+            blocks.append(_efg_block(n, desc))
     return blocks, len(hits)

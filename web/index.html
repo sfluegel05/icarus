@@ -132,6 +132,16 @@
                 title="Download every prompt this session sent to the LLM, with the model's answers (Markdown)">Download LLM conversation</button>
       </div>
 
+      <details id="learn-settings" class="learn-settings">
+        <summary>Settings</summary>
+        <div class="muted settings-note">Library predicates the learner may build on, retrieved
+          for the concept definition (half functional groups, half generated predicates).</div>
+        <label class="mini" title="Predicates an LLM generated for earlier concepts (aux_*), taken from the rule library.">
+          <input type="checkbox" id="use-aux" checked> generated predicates (aux)</label>
+        <label class="mini" title="The 583 Extended Functional Groups (efg_*), matched with RDKit.">
+          <input type="checkbox" id="use-efg" checked> functional groups (EFG)</label>
+      </details>
+
       <div id="learn-progress" class="learn-progress hidden">
         <div class="lp-head">
           <span class="lp-title">output</span>
@@ -152,6 +162,7 @@
             <div class="rule-nl-box">
               <div class="rule-nl-label">In words</div>
               <div id="rule-nl" class="rule-nl"></div>
+              <div id="rule-unfolded" class="muted rule-unfolded hidden"></div>
             </div>
           </div>
         </div>

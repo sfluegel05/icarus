@@ -70,6 +70,10 @@ rules generated earlier. ICaRuS only reads it. With a library, LLM answers for
 known ChEBI classes are served from it without a model call, and Popper and Aleph
 get extra background predicates. If you have `rule_library.zip`, unzip it so that
 `data/rule_library/programs/` exists. Without a library everything still works.
+The LLM tends to regenerate the same predicate under similar names;
+`python scripts/dedup_library.py` reports such duplicates (identical programs, or
+the same extension on two ChEBI samples and a similar name) and `--apply` merges
+them, after backing the library up to `data/rule_library.bak-<timestamp>`.
 
 ### 3. Run
 
@@ -234,7 +238,11 @@ invite code, remove it from `ICARUS_INVITE_CODES` and restart.
    - **Library predicates for Popper / Aleph.** When the concept has a definition,
      the `ICARUS_ILP_LIBRARY_TOP_N` library predicates most relevant to it (BM25
      over name and definition) are evaluated on the session molecules and offered
-     as extra body predicates.
+     as extra body predicates. Half of them are LLM-generated `aux_*` predicates
+     from the rule library, half are `efg_*` functional groups (the 583 Extended
+     Functional Groups, matched with RDKit; tables vendored in `icarus/resources/`).
+     The LLM pipeline gets the same split for the predicates it may reuse. Either
+     kind can be switched off under **Settings** next to the learn button.
 
    The page shows the rule with a **natural-language translation**, a confusion
    matrix, and the molecules **not classified as labelled**. Each molecule the rule

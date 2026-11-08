@@ -408,3 +408,11 @@ main.doc-main { max-width: 960px; }
 .tut-fig figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; text-align: center; }
 .tut-shot { display: block; max-width: 100%; height: auto; margin: 0 auto; border: 1px solid var(--border); border-radius: 8px; }
 .tut-shot-narrow { max-width: min(480px, 100%); }
+
+/* learn settings (library predicate kinds) */
+.learn-settings { margin: -2px 0 10px; font-size: 12px; }
+.learn-settings summary { cursor: pointer; color: var(--muted); }
+.learn-settings .settings-note { margin: 4px 0 6px; }
+.learn-settings label.mini { margin-right: 14px; }
+.learn-settings input[type="checkbox"] { width: auto; vertical-align: middle; }
+.rule-unfolded { margin-top: 6px; font-style: italic; }

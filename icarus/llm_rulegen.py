@@ -45,11 +45,13 @@ from chebILP.predicate_generation.generate_auxiliary_rules import (
     RuleGenerator,
     _build_eval_facts,
 )
+from chebILP.molecule_processing.fg_matching import is_fg_seed_name, seed_fg_library
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
-from . import config, llm_guard
+from . import config, efg, llm_guard
 
 llm_guard.install()
+efg.install()
 
 TARGET = config.TARGET_LABEL
 
@@ -95,16 +97,24 @@ class _SessionRuleGenerator(RuleGenerator):
     pipeline's own.
     """
 
-    def __init__(self, *args, pos_rows, neg_rows, **kwargs):
+    def __init__(self, *args, pos_rows, neg_rows, use_aux=True, **kwargs):
         super().__init__(*args, **kwargs)
         self._pos_rows = pos_rows
         self._neg_rows = neg_rows
+        self._use_aux = use_aux
 
     def build_retriever(self):
         # BM25-only: adequate for a small session-local library and, unlike the dense
-        # channel, needs no sentence-transformers model download.
-        return HybridPredicateRetriever.from_rule_library(
+        # channel, needs no sentence-transformers model download. The retriever splits
+        # its candidates half seeded functional groups (efg_*), half aux predicates.
+        retriever = HybridPredicateRetriever.from_rule_library(
             base_dir=self.library_dir, use_dense=False)
+        if not self._use_aux:
+            # Library aux predicates switched off: offer only the functional groups
+            # for reuse (the model still writes new predicates of its own).
+            retriever = HybridPredicateRetriever(
+                [e for e in retriever.entries if is_fg_seed_name(e["stem"])], use_dense=False)
+        return retriever
 
     def class_context(self, chebi_id) -> dict:
         """Same ctx the parent builds, but over the session molecules rather than a
@@ -168,7 +178,9 @@ def _assemble_rule(programs, hypothesis: str, chebi_id: str) -> str:
         hypothesis += "."
     seen, blocks = set(), []
     for prog in programs:
-        if prog.name in seen:
+        # A reused functional group (efg_*) is a header-only seed: its facts come from
+        # RDKit matching at classify time, not from a clause in the rule.
+        if prog.name in seen or is_fg_seed_name(prog.name):
             continue
         seen.add(prog.name)
         text = prog.source.strip()
@@ -228,13 +240,18 @@ def learn_streaming(pos_mols, neg_mols, timeout, on_line, model, concept=None,
             shutil.copytree(library_dir, run_library,
                             ignore=shutil.ignore_patterns("generation_logs"))
         else:
-            os.makedirs(run_library)
+            os.makedirs(os.path.join(run_library, "programs"))
+        use_aux, use_efg = ilp.library_options(concept)
+        if use_efg:
+            # Offer the Extended Functional Groups for reuse, as chebILP's
+            # --seed_predicates efg does (header-only efg_* programs in the library).
+            seed_fg_library(run_library, "efg")
         return _generate(chebi_id, info, pos_mols, neg_mols, on_line, model,
-                         run_library, work_dir)
+                         run_library, work_dir, use_aux=use_aux)
 
 
 def _generate(chebi_id, info, pos_mols, neg_mols, on_line, model, library_dir,
-              work_dir) -> dict:
+              work_dir, use_aux=True) -> dict:
     pos_rows, neg_rows = _rows(pos_mols), _rows(neg_mols)
     problem_dir = os.path.join(work_dir, "problems")  # unused (class_context overridden)
 
@@ -242,7 +259,7 @@ def _generate(chebi_id, info, pos_mols, neg_mols, on_line, model, library_dir,
         library_dir, model, config.LLM_N_PREDICATES, config.LLM_TOP_K,
         molecules=pd.concat([pos_rows, neg_rows]), problem_dir=problem_dir,
         computed_facts=config.LLM_COMPUTED_FACTS, prompt_samples=config.LLM_PROMPT_SAMPLES,
-        pos_rows=pos_rows, neg_rows=neg_rows,
+        pos_rows=pos_rows, neg_rows=neg_rows, use_aux=use_aux,
     )
     gen.retriever = gen.build_retriever()
 

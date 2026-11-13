@@ -119,49 +119,10 @@ def state_dict(s: Session) -> dict:
     }
     if s.current_rule:
         out["report"] = _report(s, preds)
-        out["rule_parts"] = parts = ilp.rule_parts(s.current_rule)
-        if parts:
-            # The block editor shows the hypothesis with its auxiliary predicates
-            # unfolded; the logic-program view shows the rule as written.
-            parts["main"]["editor"] = _editor_rule(s.current_rule)
+        # The logic-program view shows the rule as written; the block editor fetches it
+        # with its auxiliary predicates unfolded from /api/rule/editor.
+        out["rule_parts"] = ilp.rule_parts(s.current_rule)
     return out
-
-
-def _editor_rule(rule: str, only: str | None = None) -> str | None:
-    try:
-        return explain.editor_rule(rule, only)
-    except Exception:
-        traceback.print_exc()
-        return None
-
-
-def _unfold_one(rule: str, pred: str) -> dict:
-    out = _editor_rule(rule, pred)
-    if out is None:
-        return {"rule": None, "error": f"Could not unfold {pred}."}
-    if not explain.mentions(out, pred):
-        return {"rule": out}
-    try:
-        why = explain.unfold_failure(rule, pred)
-    except Exception:
-        traceback.print_exc()
-        why = "its definition could not be read"
-    return {"rule": out, "error": f"Could not unfold {pred}: {why}."}
-
-
-async def rule_unfold(request: Request):
-    """The block-editor form (auxiliary predicates unfolded) of a rule: one edited in
-    the logic-program view (the client sends the program it would apply), or, with
-    ``pred``, one block-editor clause in which only that generated predicate is to be
-    unfolded (``error`` says why when it stays folded)."""
-    body = await request.json()
-    rule = ilp.expand_aux_definitions((body.get("rule") or "").strip())
-    pred = body.get("pred")
-    if pred is not None:
-        if not isinstance(pred, str) or not re.fullmatch(r"[a-z]\w{0,200}", pred):
-            return JSONResponse({"error": "Bad predicate name."}, status_code=400)
-        return JSONResponse(await run_in_threadpool(_unfold_one, rule, pred))
-    return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule)})
 
 
 def _int(v, default, lo, hi):
@@ -181,6 +142,7 @@ _MAX_CLASS_EXAMPLES = 100
 _MAX_ADD_LINES = 200
 _MAX_IMPORT_MOLECULES = 1000
 _MAX_IMPORT_RULES = 200
+_MAX_RULE_CHARS = 100_000  # an LLM rule with all its definitions is a few kB
 
 _LABEL_GROUPS = {"pos": "positives", "neg": "negatives", "unlabeled": "unlabeled"}
 
@@ -302,6 +264,81 @@ async def explain_rule(request: Request, s: Session):
         traceback.print_exc()
         return JSONResponse({"error": f"Could not explain the rule: {e}"}, status_code=500)
     return JSONResponse(data)
+
+
+def _editor_rule(rule: str, only: str | None = None) -> str | None:
+    try:
+        return explain.editor_rule(rule, only)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+@with_session
+async def rule_editor(request: Request, s: Session):
+    """The current rule's hypothesis with its auxiliary predicates unfolded, for the
+    block editor. Not part of the state: unfolding grounds with clingo (and the first
+    call reads the library), which must not run on the event loop under the lock."""
+    with s.lock:
+        rule = s.current_rule
+    if not rule:
+        return JSONResponse({"rule": None, "source": None})
+    return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule), "source": rule})
+
+
+def _unfold_one(rule: str, pred: str) -> dict:
+    out = _editor_rule(rule, pred)
+    if out is None:
+        return {"rule": None, "error": f"Could not unfold {pred}."}
+    if not explain.mentions(out, pred):
+        return {"rule": out}
+    try:
+        why = explain.unfold_failure(rule, pred)
+    except Exception:
+        traceback.print_exc()
+        why = "its definition could not be read"
+    return {"rule": out, "error": f"Could not unfold {pred}: {why}."}
+
+
+# Interval terms ("1..1000000000") outside comments: a one-line way to make clingo
+# ground an enormous program. No library program or learned rule uses them.
+_INTERVAL_RE = re.compile(r"^[^%\n]*(?:\d|[A-Z_]\w*|\))\s*\.\.\s*(?:\d|[A-Z_(-])", re.MULTILINE)
+
+
+def _client_rule(body) -> tuple[str, JSONResponse | None]:
+    """The ``rule`` a client sent, stripped, or an error response: it must be a string
+    of bounded size without interval terms, since it is grounded with clingo."""
+    rule = body.get("rule") if isinstance(body, dict) else None
+    if rule is None:
+        rule = ""
+    if not isinstance(rule, str):
+        return "", JSONResponse({"error": "The rule must be text."}, status_code=400)
+    if len(rule) > _MAX_RULE_CHARS:
+        return "", JSONResponse({"error": f"The rule is too long (at most {_MAX_RULE_CHARS} "
+                                          "characters)."}, status_code=400)
+    if _INTERVAL_RE.search(rule):
+        return "", JSONResponse({"error": "Intervals (a..b) are not supported in rules."},
+                                status_code=400)
+    return rule.strip(), None
+
+
+@with_session
+async def rule_unfold(request: Request, s: Session):
+    """The block-editor form (auxiliary predicates unfolded) of a rule: one edited in
+    the logic-program view (the client sends the program it would apply), or, with
+    ``pred``, one block-editor clause in which only that generated predicate is to be
+    unfolded (``error`` says why when it stays folded)."""
+    body = await request.json()
+    rule, err = _client_rule(body)
+    if err:
+        return err
+    pred = body.get("pred")
+    if pred is not None and (not isinstance(pred, str) or not re.fullmatch(r"[a-z]\w{0,200}", pred)):
+        return JSONResponse({"error": "Bad predicate name."}, status_code=400)
+    rule = await run_in_threadpool(ilp.expand_aux_definitions, rule)
+    if pred is not None:
+        return JSONResponse(await run_in_threadpool(_unfold_one, rule, pred))
+    return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule)})
 
 
 @with_session
@@ -687,11 +724,13 @@ async def learn_progress(request: Request, s: Session):
 @with_session
 async def rule_edit(request: Request, s: Session):
     body = await request.json()
-    new_rule = (body.get("rule") or "").strip()
+    new_rule, err = _client_rule(body)
+    if err:
+        return err
     # A rule that uses a generated (aux_*) predicate carries only the literal; pull in
     # the predicate's definition from the library so it is self-contained and clingo
     # can actually derive it (otherwise it classifies everything negative).
-    new_rule = ilp.expand_aux_definitions(new_rule)
+    new_rule = await run_in_threadpool(ilp.expand_aux_definitions, new_rule)
     with s.lock:
         if not ilp.rule_targets_ok(new_rule):
             return JSONResponse(
@@ -752,6 +791,7 @@ routes = [
     Route("/api/explain", explain_molecule),
     Route("/api/rule/explain", explain_rule),
     Route("/api/rule/unfold", rule_unfold, methods=["POST"]),
+    Route("/api/rule/editor", rule_editor),
     Route("/api/state", api_state),
     Route("/api/predicates", api_predicates),
     Route("/api/predicates/search", api_predicates_search),

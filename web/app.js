@@ -157,10 +157,10 @@ function render(state) {
       lastRuleSig = sig;
       // Blocks: the hypothesis with its auxiliary predicates unfolded. Logic program:
       // the hypothesis as written.
-      Blocks.load(parts.main.editor || parts.main.rule || "");
       $("rule-text").value = parts.main.rule || "";
       editorDirty = false;
       editSource = null;
+      loadEditorBlocks(sig, state.current_rule, parts.main.rule || "");
     }
     loadRuleExplanation(state.current_rule);
     renderAux(parts.aux || []);
@@ -179,6 +179,24 @@ function render(state) {
 let lastRuleSig = null;
 let editorDirty = false;
 let editSource = null;
+
+// The block editor shows the rule with its auxiliary predicates unfolded, which the
+// server computes on request (not in the state: it grounds with clingo). Until it
+// arrives the blocks show the hypothesis as written; a rule without auxiliary
+// predicates needs no request. Results are kept per rule text (revert, reselect).
+const editorRules = new Map();
+
+async function loadEditorBlocks(sig, rule, hypothesis) {
+  if (!/\baux_/.test(rule || "")) { Blocks.load(hypothesis); return; }
+  if (editorRules.has(rule)) { Blocks.load(editorRules.get(rule)); return; }
+  Blocks.load(hypothesis);
+  let data;
+  try { data = await api("api/rule/editor"); } catch (e) { return; }
+  if (!data.rule || data.source !== rule) return;
+  editorRules.set(rule, data.rule);
+  // Still the same rule, and not edited meanwhile.
+  if (lastRuleSig === sig && editSource === null) Blocks.load(data.rule);
+}
 
 function updateEditedFlag() {
   $("edited-flag").textContent =
@@ -422,7 +440,9 @@ async function blocksFromProgram() {
   const rule = programRule();
   try {
     const data = await api("api/rule/unfold", { rule });
-    if (programRule() === rule && editSource === "program") Blocks.load(data.rule || "");
+    // No blocks for it (no concept clause yet, or the server could not unfold it):
+    // keep the last blocks rather than wiping the editor mid-edit.
+    if (data.rule && programRule() === rule && editSource === "program") Blocks.load(data.rule);
   } catch (e) { /* toast already shown */ }
 }
 

@@ -1081,7 +1081,12 @@
       head.appendChild(rm);
       f.appendChild(head);
       if (!this.members(cl, g).length) {
-        f.insertAdjacentHTML("beforeend", `<div class="area-hint group-hint">drag atoms here, or drop atom properties</div>`);
+        // A count box counts its atoms: without one it is left out of the rule (with
+        // its molecule properties), so say so rather than drop them silently.
+        const idle = g.kind === "count" && (g.molChips || []).length;
+        f.insertAdjacentHTML("beforeend", idle
+          ? `<div class="area-hint group-hint warn">not part of the rule until it has an atom to count: drag atoms here, or drop atom properties</div>`
+          : `<div class="area-hint group-hint">drag atoms here, or drop atom properties</div>`);
       }
       const resize = document.createElement("div");
       resize.className = "group-resize"; resize.title = "drag to resize";
@@ -1270,7 +1275,7 @@
         if (!g) return;
         if (scope === "any") scope = g.inMol ? "molecule" : "atom";
         if (scope === "molecule") this.addChip(g.molChips, pred);
-        else if (!g.inMol) {
+        else if (scope === "atom" && !g.inMol) {
           const n = this.members(cl, g).length;
           cl.atoms.push({ id: newId(), chips: [{ pred }], group: g.id,
             counted: g.kind === "count" && !this.members(cl, g).some((x) => x.counted),

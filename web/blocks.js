@@ -562,6 +562,8 @@
       this.canvasEl = opts.canvas;
       this.onChangeCb = opts.onChange || null;
       this.searchAuxCb = opts.searchAux || null;  // (q, offset) → {results, total}
+      this.unfoldCb = opts.unfold || null;        // (clause, pred) → {rule, error?}
+      this.notifyCb = opts.notify || null;        // (message) → shown to the user
       this.canvasEl.addEventListener("click", (e) => this.onCanvasClick(e));
       this.renderCanvas();
     },
@@ -948,7 +950,7 @@
       const selMol = this.selected && this.selected.ci === ci && this.selected.kind === "mol";
       if (selMol) mol.classList.add("selected");
       mol.innerHTML = `<span class="area-label">Whole molecule</span>`;
-      (cl.molChips || []).forEach((ch, idx) => mol.appendChild(this.chipEl(ch.pred, () => { cl.molChips.splice(idx, 1); this.renderCanvas(); this.changed(); })));
+      (cl.molChips || []).forEach((ch, idx) => mol.appendChild(this.chipEl(ch.pred, () => { cl.molChips.splice(idx, 1); this.renderCanvas(); this.changed(); }, null, ci)));
       (cl.groups || []).filter((g) => g.inMol).forEach((g) => mol.appendChild(this.molNotBox(cl, ci, g)));
       if (!(cl.molChips || []).length && !(cl.groups || []).some((g) => g.inMol)) {
         mol.insertAdjacentHTML("beforeend", `<span class="area-hint">drop a molecule property here (e.g. aromatic)</span>`);
@@ -1017,7 +1019,7 @@
       box.className = "mol-not dropzone";
       if (this.isSelected(ci, g)) box.classList.add("selected");
       box.innerHTML = `<span class="group-kind">not</span>`;
-      (g.molChips || []).forEach((ch, idx) => box.appendChild(this.chipEl(ch.pred, () => { g.molChips.splice(idx, 1); this.renderCanvas(); this.changed(); })));
+      (g.molChips || []).forEach((ch, idx) => box.appendChild(this.chipEl(ch.pred, () => { g.molChips.splice(idx, 1); this.renderCanvas(); this.changed(); }, null, ci)));
       if (!(g.molChips || []).length) box.insertAdjacentHTML("beforeend", `<span class="area-hint">drop here</span>`);
       const rm = document.createElement("button");
       rm.className = "chip-x"; rm.textContent = "×"; rm.title = "remove this NOT box";
@@ -1071,7 +1073,7 @@
         const n2 = head.querySelector(".group-n2");
         if (n2) n2.addEventListener("input", (e) => { g.n2 = parseInt(e.target.value, 10) || 0; this.changed(); });
       }
-      (g.molChips || []).forEach((ch, idx) => head.appendChild(this.chipEl(ch.pred, () => { g.molChips.splice(idx, 1); this.renderCanvas(); this.changed(); })));
+      (g.molChips || []).forEach((ch, idx) => head.appendChild(this.chipEl(ch.pred, () => { g.molChips.splice(idx, 1); this.renderCanvas(); this.changed(); }, null, ci)));
       const rm = document.createElement("button");
       rm.className = "mini-btn x"; rm.textContent = "×";
       rm.title = "remove the box (its atoms stay, as part of the main pattern)";
@@ -1188,7 +1190,8 @@
       chips.className = "atom-chips";
       (a.chips || []).forEach((ch, idx) => chips.appendChild(this.chipEl(ch.pred,
         () => { a.chips.splice(idx, 1); this.renderCanvas(); this.changed(); },
-        () => { ch.pred = ch.pred.startsWith("not ") ? ch.pred.slice(4) : "not " + ch.pred; this.renderCanvas(); this.changed(); })));
+        () => { ch.pred = ch.pred.startsWith("not ") ? ch.pred.slice(4) : "not " + ch.pred; this.renderCanvas(); this.changed(); },
+        ci)));
       if (!(a.chips || []).length) chips.innerHTML = `<span class="area-hint">drop atom properties</span>`;
       box.appendChild(chips);
 
@@ -1200,10 +1203,23 @@
     },
 
     // A property chip; `onNegate` (atom chips) adds a "¬" toggle between p and not p.
-    chipEl(pred, onRemove, onNegate) {
+    // A generated predicate's chip in clause `ci` gets an "unfold" button.
+    chipEl(pred, onRemove, onNegate, ci) {
       const chip = document.createElement("span");
       chip.className = "chip" + (pred.startsWith("not ") ? " neg" : "");
       chip.innerHTML = `<span class="chip-label">${escapeHtml(labelFor(pred))}</span>`;
+      const base = pred.replace(/^not /, "");
+      // Not on a negated atom chip: its definition would constrain that atom from
+      // inside a not box, which the editor can't draw.
+      const negAtom = onNegate && pred.startsWith("not ");
+      if (ci != null && this.unfoldCb && base.startsWith("aux_") && !negAtom) {
+        chip.title = base;
+        const u = document.createElement("button");
+        u.className = "chip-unfold"; u.textContent = "⊞";
+        u.title = "unfold: replace this generated predicate by its definition (atoms and bonds)";
+        u.onclick = (e) => { e.stopPropagation(); this.unfoldPred(ci, base, u); };
+        chip.appendChild(u);
+      }
       if (onNegate) {
         const n = document.createElement("button");
         n.className = "chip-not"; n.textContent = "¬";
@@ -1216,6 +1232,27 @@
       x.onclick = (e) => { e.stopPropagation(); onRemove(); };
       chip.appendChild(x);
       return chip;
+    },
+
+    // Replace generated predicate `pred` in clause `ci` by its definition: the server
+    // unfolds the clause (only that predicate, and the helpers it uses), and the result
+    // — one clause per alternative of the definition — takes the clause's place.
+    async unfoldPred(ci, pred, btn) {
+      const cl = this.model.clauses[ci];
+      const text = cl && compileClause(cl);
+      if (!text) return;
+      if (btn) btn.disabled = true;
+      let data;
+      try { data = await this.unfoldCb(text, pred); } catch (e) { if (btn) btn.disabled = false; return; }
+      // The clause was edited (or the rule reloaded) meanwhile: the result is stale.
+      if (this.model.clauses[ci] !== cl || compileClause(cl) !== text) return;
+      if (btn) btn.disabled = false;
+      const clauses = data && data.rule ? parseRule(data.rule).clauses : [];
+      if (data && data.error) { if (this.notifyCb) this.notifyCb(data.error); return; }
+      if (!clauses.length) return;
+      this.model.clauses.splice(ci, 1, ...clauses);
+      this.selected = null;
+      this.renderCanvas(); this.changed();
     },
 
     // ── selection (click-to-add) ──────────────────────────────────────────────
@@ -1244,7 +1281,7 @@
       }
       if (scope === "any") scope = (s && s.kind === "atom") ? "atom" : "molecule";
       if (scope === "molecule") {
-        const ci = s && s.kind === "mol" ? s.ci : 0;
+        const ci = s ? s.ci : 0;  // the selected atom's clause, too
         const cl = this.model.clauses[ci]; if (!cl || cl.rawClause) return;
         this.addChip(cl.molChips, pred);
       } else if (scope === "atom") {

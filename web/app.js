@@ -1102,6 +1102,14 @@ Blocks.init({
   palette: $("block-palette"),
   canvas: $("block-canvas"),
   searchAux: (q, offset) => api(`api/predicates/search?q=${encodeURIComponent(q)}&offset=${offset}`),
+  // Unfold one generated predicate in a block clause. The rule's own auxiliary
+  // definitions go along (an LLM rule's new predicates are not in the library).
+  unfold: (clause, pred) => {
+    const aux = Array.from(document.querySelectorAll(".aux-rule"))
+      .map((t) => t.value.trim()).filter(Boolean);
+    return api("api/rule/unfold", { rule: [...aux, clause].join("\n\n"), pred });
+  },
+  notify: toast,
   onChange: () => {
     // A block edit: mark dirty and mirror the compiled hypothesis into the logic program.
     editorDirty = true;

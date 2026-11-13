@@ -333,18 +333,75 @@ def catalog() -> list[dict]:
 _HEAD_ARITY_RE = re.compile(r"^\s*([a-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*:-", re.MULTILINE)
 
 
-def _aux_head_arity(program_path: str) -> int | None:
-    """Arity of an aux predicate from the head of its ``.pl`` program, or None."""
-    try:
-        with open(program_path, encoding="utf-8") as f:
-            source = f.read()
-    except OSError:
-        return None
-    m = _HEAD_ARITY_RE.search(source)
+def _head_arity(source: str, name: str, fallback: bool = True) -> int | None:
+    """Arity of ``name`` from its head in a program's source (a program may define
+    helpers before its own predicate), else (``fallback``) of the first head, or None."""
+    heads = list(_HEAD_ARITY_RE.finditer(source or ""))
+    m = next((h for h in heads if h.group(1) == name),
+             heads[0] if heads and fallback else None)
     if not m:
         return None
     args = m.group(2).strip()
     return 0 if not args else len([a for a in args.split(",") if a.strip()])
+
+
+# Clauses of a program (comment lines dropped): head name, head args, body.
+_CLAUSE_RE = re.compile(r"^\s*([a-z]\w*)\s*\(([^)]*)\)\s*:-(.*?)\.[ \t]*$", re.MULTILINE | re.DOTALL)
+_LIT_RE = re.compile(r"(?<![A-Za-z0-9_])([a-z]\w*)\s*\(([^()]*)\)")
+# Background predicates that only hold of a molecule.
+_MOL_PREDS = {"aromatic", "aliphatic", "mol_weight", "ring_size"}
+
+
+def _program_clauses(source: str) -> list[tuple[str, list[str], str]]:
+    text = "\n".join(line for line in (source or "").splitlines()
+                     if not line.lstrip().startswith("%"))
+    return [(m.group(1), [a.strip() for a in m.group(2).split(",")], m.group(3))
+            for m in _CLAUSE_RE.finditer(text)]
+
+
+def _clause_role(var: str, body: str, roles: dict) -> str | None:
+    """Whether a clause's body uses its head variable ``var`` as the molecule or as an
+    atom: ``has_atom(var, _)``, a molecule property or a functional group on ``var``
+    → "molecule"; ``has_atom(_, var)``, an atom property or a bond → "atom"; a
+    generated predicate with ``var`` as its i-th argument → the role of that argument
+    (``roles[(pred, i)]``)."""
+    via = []
+    for pred, args in _LIT_RE.findall(body):
+        args = [a.strip() for a in args.split(",")]
+        if var not in args:
+            continue
+        if pred == "has_atom" and len(args) == 2:
+            return "molecule" if args[0] == var else "atom"
+        if pred in _MOL_PREDS or pred.startswith(("net_charge_", "efg_")):
+            return "molecule"
+        if pred.startswith("aux_"):
+            via += [(pred, i) for i, a in enumerate(args) if a == var]
+            continue
+        return "atom"  # an element, charge, ring, H-count … chip, or a bond
+    return next((roles[k] for k in via if roles.get(k)), None)
+
+
+def aux_roles(sources, known: dict | None = None) -> dict[tuple[str, int], str]:
+    """``{(predicate, argument index): "molecule" | "atom"}`` for the predicates the
+    program ``sources`` define (helpers included), from how each clause uses its
+    arguments; ``known`` roles (of predicates defined elsewhere) resolve chains of
+    generated predicates. Arguments with no evidence either way are left out."""
+    clauses = [c for s in sources for c in _program_clauses(s)]
+    roles = dict(known or {})
+    found = {}
+    for _ in range(10):  # chains of helpers resolve one link per pass
+        grew = False
+        for pred, args, body in clauses:
+            for i, var in enumerate(args):
+                if (pred, i) in found or not var[:1].isupper():
+                    continue
+                role = _clause_role(var, body, roles)
+                if role:
+                    found[(pred, i)] = roles[(pred, i)] = role
+                    grew = True
+        if not grew:
+            break
+    return found
 
 
 _ID_SUFFIX_RE = re.compile(r"_(\d{4,})$")
@@ -404,60 +461,63 @@ def aux_label(pred: str) -> str:
     return name.replace("_", " ").strip()
 
 
-def _library_descriptions(library_dir: str) -> dict[str, str]:
-    """``aux_name -> description`` (``% DESCRIPTION`` header) of the library's programs."""
-    from chebILP.predicate_generation.auxiliary_rules import load_library_rules
-
-    return {p.name: p.description for p in load_library_rules(library_dir)}
-
-
 @functools.lru_cache(maxsize=4)
 def aux_index(library_dir: str) -> tuple[dict, dict]:
     """Every predicate of the (read-only) library, loaded once:
-    ``({name: (description, arity, label, origin_chebi_id)}, {label: count})``.
+    ``({name: (description, arity, label, origin_chebi_id, role)}, {label: count})``,
+    ``role`` being "molecule", "atom" or None (see :func:`aux_roles`).
     Several predicates share a readable label (``aux_acyclic_molecule`` and
     ``aux_acyclic_molecule_10283`` both read "acyclic molecule"); the counts mark
     the labels that need the ChEBI id to tell them apart."""
     if not (library_dir and os.path.isdir(library_dir)):
         return {}, {}
-    programs_dir = os.path.join(library_dir, "programs")
-    if not os.path.isdir(programs_dir):
-        programs_dir = library_dir
-
-    def arity(name):
-        for ext in (".pl", ".py"):
-            path = os.path.join(programs_dir, name + ext)
-            if os.path.exists(path):
-                return _aux_head_arity(path) if ext == ".pl" else None
-        return None
-
     origins = _origins(library_dir)
     entries, counts = {}, {}
     try:
-        descriptions = _library_descriptions(library_dir)
+        programs = _library_programs(library_dir)
     except Exception:
         return {}, {}
-    for name, desc in descriptions.items():
-        label = aux_label(name) or name
-        entries[name] = (desc or "", arity(name), label, _origin(name, origins))
+    roles = library_roles(library_dir)
+    for p in programs:
+        label = aux_label(p.name) or p.name
+        arity = _head_arity(p.source, p.name)
+        entries[p.name] = (p.description or "", arity, label, _origin(p.name, origins),
+                           roles.get((p.name, 0)) if arity == 1 else None)
         counts[label] = counts.get(label, 0) + 1
     return entries, counts
 
 
-def _aux_block(name, desc, arity, label, chebi_id, ambiguous) -> dict:
+@functools.lru_cache(maxsize=4)
+def _library_programs(library_dir: str) -> tuple:
+    from chebILP.predicate_generation.auxiliary_rules import load_library_rules
+
+    return tuple(load_library_rules(library_dir))
+
+
+@functools.lru_cache(maxsize=4)
+def library_roles(library_dir: str) -> dict[tuple[str, int], str]:
+    """:func:`aux_roles` of every library program (helpers included)."""
+    try:
+        return aux_roles([p.source for p in _library_programs(library_dir)])
+    except Exception:
+        return {}
+
+
+def _aux_block(name, desc, arity, label, chebi_id, ambiguous, role=None) -> dict:
     """Palette block for one generated predicate. ``ambiguous``: its readable label
     is shared with another predicate, so the label carries the ChEBI id of the class
     it was generated for."""
     if ambiguous and chebi_id:
         label = f"{label} (CHEBI:{chebi_id})"
-    # An arity-1 generated predicate may hold of the molecule OR of a single
-    # atom — the arity alone doesn't say which — so scope "any" lets the user
-    # drop it onto the molecule area or an atom, wherever it belongs. Arity-2
-    # is a relation between two atoms (drawn with the bond/connect handle).
+    # An arity-1 generated predicate holds of the molecule or of a single atom: its
+    # definition says which (``role``), so the editor only lets it be dropped there
+    # (a molecule predicate on an atom would compile to a rule that matches nothing).
+    # Without evidence either way, scope "any" lets the user decide. Arity-2 is a
+    # relation between two atoms (drawn with the bond/connect handle).
     if arity == 2:
         scope, nl = "bond", f"forms “{label}” with"
     else:
-        scope, nl = "any", f"has the property “{label}”"
+        scope, nl = role or "any", f"has the property “{label}”"
     return {
         "id": f"aux_{name}",
         "category": "Generated (LLM)",
@@ -478,33 +538,28 @@ def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) 
     its headers) — predicates a fresh LLM run generated are not in the read-only
     library.
 
-    Names + descriptions come from the programs' headers; the arity
-    (parsed from each program head) decides the scope — arity 1 is treated as a
-    molecule-level property, arity 2 as an atom relation. These are only a palette
-    default: the Prolog→block parser places an aux usage by its actual argument
-    role, so a rule always round-trips regardless of this hint.
+    Names + descriptions come from the programs' headers; the arity (from each
+    program's head) and the role of its argument (:func:`aux_roles`) decide the
+    scope: arity 1 is a molecule or an atom property, arity 2 an atom relation.
+    These only steer where the palette lets a block be dropped: the Prolog→block
+    parser places an aux usage by its actual argument role, so a rule always
+    round-trips regardless.
     """
     entries, counts = aux_index(library_dir)
     counts = dict(counts)
     chosen = [(n, *e) for n, e in entries.items() if names is None or n in names]
 
-    def rule_arity(name):
-        for m in _HEAD_ARITY_RE.finditer(rule or ""):
-            if m.group(1) == name:
-                args = m.group(2).strip()
-                return 0 if not args else len([a for a in args.split(",") if a.strip()])
-        return None
-
-    for n, d in (rule_descriptions or {}).items():
-        if n in entries:
-            continue
+    new = [n for n in (rule_descriptions or {}) if n not in entries]
+    roles = aux_roles([rule or ""], library_roles(library_dir)) if new else {}
+    for n in new:
         label = aux_label(n) or n
         counts[label] = counts.get(label, 0) + 1
         m = _ID_SUFFIX_RE.search(n)
-        chosen.append((n, d, rule_arity(n), label, m.group(1) if m else None))
+        chosen.append((n, rule_descriptions[n], _head_arity(rule or "", n, fallback=False),
+                       label, m.group(1) if m else None, roles.get((n, 0))))
 
-    return [_aux_block(n, d, a, label, cid, counts.get(label, 0) > 1)
-            for n, d, a, label, cid in sorted(chosen)]
+    return [_aux_block(n, d, a, label, cid, counts.get(label, 0) > 1, role)
+            for n, d, a, label, cid, role in sorted(chosen, key=lambda c: c[0])]
 
 
 def _efg_label(name: str, desc: str) -> str:
@@ -548,7 +603,7 @@ def search_aux_blocks(library_dir: str, query: str, limit: int = 50,
     terms = (query or "").lower().replace("chebi:", "").split()
     q = " ".join(terms)
     hits = []
-    candidates = [(n, desc, label, cid) for n, (desc, _, label, cid) in entries.items()]
+    candidates = [(n, desc, label, cid) for n, (desc, _, label, cid, _) in entries.items()]
     candidates += [(n, d, _efg_label(n, d), None) for n, d in efg.vocabulary()]
     for name, desc, label, cid in candidates:
         low_name, low_label = name.lower(), label.lower()
@@ -561,8 +616,8 @@ def search_aux_blocks(library_dir: str, query: str, limit: int = 50,
     blocks = []
     for _, _, n, desc in hits[offset:offset + limit]:
         if n in entries:
-            desc, arity, label, cid = entries[n]
-            blocks.append(_aux_block(n, desc, arity, label, cid, counts[label] > 1))
+            desc, arity, label, cid, role = entries[n]
+            blocks.append(_aux_block(n, desc, arity, label, cid, counts[label] > 1, role))
         else:
             blocks.append(_efg_block(n, desc))
     return blocks, len(hits)

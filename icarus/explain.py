@@ -4,8 +4,8 @@
   and one or two sentences.
 - :func:`explain_molecule` — why the rule does or does not accept one molecule: the
   molecule with the match (or the closest match) highlighted, and a sentence.
-- :func:`editor_rule` — the hypothesis with its auxiliary predicates unfolded, for the
-  block editor.
+- :func:`editor_rule` — the hypothesis with its auxiliary predicates (or just one of
+  them) unfolded, for the block editor.
 
 A rule here is a whole icarus program: the ``concept`` hypothesis plus any auxiliary
 programs it defines itself (an LLM rule's new predicates, with their ``% PREDICATE_NAME``
@@ -104,14 +104,36 @@ def _restore_anonymous(items, bound: set[str]) -> list:
     return out
 
 
+def _uses(defs: dict, pred: str) -> set[str]:
+    """``pred`` and every predicate its definition uses, transitively."""
+    seen, todo = set(), [pred]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        for c in defs.get(p, []):
+            todo += re.findall(r"(?<![A-Za-z0-9_])([a-z]\w*)\s*\(", " ".join(map(str, c.body)))
+    return seen
+
+
+def mentions(text: str, pred: str) -> bool:
+    """Whether ``text`` has a literal of ``pred``."""
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(pred)}\s*\(", text or "") is not None
+
+
 @functools.lru_cache(maxsize=256)
-def editor_rule(rule: str) -> str:
+def editor_rule(rule: str, only: str | None = None) -> str:
     """The rule's hypothesis with its auxiliary predicates unfolded into plain clauses,
     for the block editor: chebILP's ``rule_ir.unfold``, so a multi-clause definition
     becomes several (OR) clauses. A negated auxiliary predicate stays as written (the
     editor has no block for a negated group), as does anything chebILP's unfolding policy
     keeps folded (recursion, too many alternatives); those still need their definitions,
-    which the rule keeps. Equivalent to the hypothesis under the rule's definitions."""
+    which the rule keeps. Equivalent to the hypothesis under the rule's definitions.
+
+    With ``only``, just that predicate is unfolded (with the helpers its definition
+    uses); every other defined predicate stays as written — the block editor's "unfold"
+    on one generated-predicate chip."""
     from chebILP.explainability.rule_ir import (
         UnfoldPolicy, definitions, ordered_vars, parse_program, unfold,
     )
@@ -125,7 +147,8 @@ def editor_rule(rule: str) -> str:
     except Exception:
         return hypothesis
     support = "\n".join(p["source"] for p in programs)
-    policy = UnfoldPolicy(inline_negation=False)
+    keep = frozenset(defs) - _uses(defs, only) if only else frozenset()
+    policy = UnfoldPolicy(inline_negation=False, keep=keep)
     lines = []
     for clause in clauses:
         # Unfolded clause by clause: one that does not come out as valid, groundable
@@ -144,6 +167,30 @@ def editor_rule(rule: str) -> str:
         except Exception:
             lines.append(f"{clause}")
     return "\n".join(lines)
+
+
+def unfold_failure(rule: str, pred: str) -> str:
+    """Why ``editor_rule(rule, pred)`` left ``pred`` folded, as a phrase for the user."""
+    from chebILP.explainability.rule_ir import UnfoldPolicy, definitions, parse_program, unfold
+
+    hypothesis, programs = rule_programs(rule)
+    try:
+        defs = definitions(programs)
+        if pred not in defs:
+            return "it has no definition in the rule library"
+        keep = frozenset(defs) - _uses(defs, pred)
+        res = unfold(parse_program(hypothesis), defs,
+                     UnfoldPolicy(inline_negation=False, keep=keep))
+    except Exception:
+        return "its definition could not be read"
+    reason = res.kept.get(pred, "")
+    if reason == "recursive definition":
+        return "its definition is recursive"
+    if reason == "too many alternatives":
+        return "its definition has too many alternatives"
+    if reason.startswith("negated"):
+        return "it is negated and its definition has no not-box form"
+    return "the unfolded pattern has no block form"
 
 
 def _drop_lonely_guards(head, body: list) -> list:

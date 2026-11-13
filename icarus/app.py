@@ -127,19 +127,40 @@ def state_dict(s: Session) -> dict:
     return out
 
 
-def _editor_rule(rule: str) -> str | None:
+def _editor_rule(rule: str, only: str | None = None) -> str | None:
     try:
-        return explain.editor_rule(rule)
+        return explain.editor_rule(rule, only)
     except Exception:
         traceback.print_exc()
         return None
 
 
+def _unfold_one(rule: str, pred: str) -> dict:
+    out = _editor_rule(rule, pred)
+    if out is None:
+        return {"rule": None, "error": f"Could not unfold {pred}."}
+    if not explain.mentions(out, pred):
+        return {"rule": out}
+    try:
+        why = explain.unfold_failure(rule, pred)
+    except Exception:
+        traceback.print_exc()
+        why = "its definition could not be read"
+    return {"rule": out, "error": f"Could not unfold {pred}: {why}."}
+
+
 async def rule_unfold(request: Request):
-    """The block-editor form (auxiliary predicates unfolded) of a rule edited in the
-    logic-program view; the client sends the program it would apply."""
+    """The block-editor form (auxiliary predicates unfolded) of a rule: one edited in
+    the logic-program view (the client sends the program it would apply), or, with
+    ``pred``, one block-editor clause in which only that generated predicate is to be
+    unfolded (``error`` says why when it stays folded)."""
     body = await request.json()
     rule = ilp.expand_aux_definitions((body.get("rule") or "").strip())
+    pred = body.get("pred")
+    if pred is not None:
+        if not isinstance(pred, str) or not re.fullmatch(r"[a-z]\w{0,200}", pred):
+            return JSONResponse({"error": "Bad predicate name."}, status_code=400)
+        return JSONResponse(await run_in_threadpool(_unfold_one, rule, pred))
     return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule)})
 
 

@@ -301,6 +301,10 @@ label { font-size: 12px; color: var(--muted); }
   padding: 0 1px; cursor: pointer; display: none; }
 .chip:hover .chip-not, .chip.neg .chip-not { display: inline; }
 .chip-not:hover { color: var(--neg); }
+.chip-unfold { background: transparent; border: none; color: var(--accent); font-size: 12px; line-height: 1;
+  padding: 0 1px; cursor: pointer; }
+.chip-unfold:hover { color: var(--text); }
+.chip-unfold:disabled { opacity: .4; cursor: progress; }
 
 /* not / count boxes: frames on the atom canvas (behind their atoms) */
 .group-frame { position: absolute; z-index: 0; border: 2px dashed; border-radius: 10px; }

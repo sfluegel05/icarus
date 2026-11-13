@@ -14,7 +14,7 @@ Each block template is a JSON-able dict:
       "scope":    "molecule" | "atom" | "bond",
       "popular":  shown by default (vs. behind the "more" toggle),
       "label":    readable name for the block,
-      "nl":       readable predicate phrase (matches rule_to_nl phrasing),
+      "nl":       readable predicate phrase,
       "input":    one of
                     {"type": "toggle",  "pred": "<name>"}
                     {"type": "choice",  "options": [{"label","pred","nl"?}], "default"?}
@@ -395,6 +395,22 @@ def _origin(name: str, origins: dict[str, str]) -> str | None:
     return m.group(1) if m else origins.get(name)
 
 
+def aux_label(pred: str) -> str:
+    """Readable phrase for an ``aux_`` predicate name: drops the prefix and any
+    trailing ChEBI-id disambiguation suffix (``aux_acyclic_molecule_36685`` ->
+    ``acyclic molecule``)."""
+    name = pred[len("aux_"):] if pred.startswith("aux_") else pred
+    name = re.sub(r"_\d{4,}$", "", name)
+    return name.replace("_", " ").strip()
+
+
+def _library_descriptions(library_dir: str) -> dict[str, str]:
+    """``aux_name -> description`` (``% DESCRIPTION`` header) of the library's programs."""
+    from chebILP.predicate_generation.auxiliary_rules import load_library_rules
+
+    return {p.name: p.description for p in load_library_rules(library_dir)}
+
+
 @functools.lru_cache(maxsize=4)
 def aux_index(library_dir: str) -> tuple[dict, dict]:
     """Every predicate of the (read-only) library, loaded once:
@@ -402,10 +418,6 @@ def aux_index(library_dir: str) -> tuple[dict, dict]:
     Several predicates share a readable label (``aux_acyclic_molecule`` and
     ``aux_acyclic_molecule_10283`` both read "acyclic molecule"); the counts mark
     the labels that need the ChEBI id to tell them apart."""
-    try:
-        from chebILP.explainability.rule_to_nl import load_aux_descriptions, _format_aux_name
-    except Exception:
-        return {}, {}
     if not (library_dir and os.path.isdir(library_dir)):
         return {}, {}
     programs_dir = os.path.join(library_dir, "programs")
@@ -421,8 +433,12 @@ def aux_index(library_dir: str) -> tuple[dict, dict]:
 
     origins = _origins(library_dir)
     entries, counts = {}, {}
-    for name, desc in load_aux_descriptions(library_dir).items():
-        label = _format_aux_name(name) or name
+    try:
+        descriptions = _library_descriptions(library_dir)
+    except Exception:
+        return {}, {}
+    for name, desc in descriptions.items():
+        label = aux_label(name) or name
         entries[name] = (desc or "", arity(name), label, _origin(name, origins))
         counts[label] = counts.get(label, 0) + 1
     return entries, counts
@@ -462,17 +478,12 @@ def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) 
     its headers) — predicates a fresh LLM run generated are not in the read-only
     library.
 
-    Names + descriptions come from ``rule_to_nl.load_aux_descriptions``; the arity
+    Names + descriptions come from the programs' headers; the arity
     (parsed from each program head) decides the scope — arity 1 is treated as a
     molecule-level property, arity 2 as an atom relation. These are only a palette
     default: the Prolog→block parser places an aux usage by its actual argument
     role, so a rule always round-trips regardless of this hint.
     """
-    try:
-        from chebILP.explainability.rule_to_nl import _format_aux_name
-    except Exception:
-        return []
-
     entries, counts = aux_index(library_dir)
     counts = dict(counts)
     chosen = [(n, *e) for n, e in entries.items() if names is None or n in names]
@@ -487,7 +498,7 @@ def aux_blocks(library_dir: str, names=None, rule_descriptions=None, rule=None) 
     for n, d in (rule_descriptions or {}).items():
         if n in entries:
             continue
-        label = _format_aux_name(n) or n
+        label = aux_label(n) or n
         counts[label] = counts.get(label, 0) + 1
         m = _ID_SUFFIX_RE.search(n)
         chosen.append((n, d, rule_arity(n), label, m.group(1) if m else None))

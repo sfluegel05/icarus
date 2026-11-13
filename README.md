@@ -244,12 +244,15 @@ invite code, remove it from `ICARUS_INVITE_CODES` and restart.
      The LLM pipeline gets the same split for the predicates it may reuse. Either
      kind can be switched off under **Settings** next to the learn button.
 
-   The page shows the rule with a **natural-language translation**, a confusion
-   matrix, and the molecules **not classified as labelled**. Each molecule the rule
-   classifies as positive has a **"?"** button that explains why, in text and as a
-   picture with the relevant atoms highlighted (chebILP's `explain_molecule` via
-   xclingo).
-4. **Edit and iterate.** Edit the rule with the block editor or as Prolog, apply it,
+   The page shows the rule as blocks, with its auxiliary predicates unfolded, next to
+   an **explanation** (a picture of the pattern it asks for and a short sentence, from
+   chebILP's `explain_rule`), a confusion matrix, and the molecules **not classified as
+   labelled**. The rule as written, with its auxiliary predicates, is in the **Logic
+   program** view. Each molecule has a **"?"** button that explains why the rule
+   accepts it (the match highlighted) or rejects it (the closest match and where it
+   fails). This is chebILP's `explain_molecule`.
+4. **Edit and iterate.** Edit the rule with the block editor (atoms, bonds, and *not* /
+   *count* boxes around parts of the pattern) or as Prolog, apply it,
    and see which classifications changed. Every learned or edited rule is kept in a
    history and can be re-selected or re-scored against the current examples.
 
@@ -264,7 +267,8 @@ has an oxygen atom").
 | `icarus/data_store.py` | Loads the ChEBI molecule table and hierarchy once; class search and example gathering |
 | `icarus/session.py` | In-memory sessions, one per browser tab; SMILES/InChI parsing |
 | `icarus/similarity.py` | Fingerprint pool (cached in `data/fingerprints.pkl`) and MMR suggestions |
-| `icarus/ilp.py` | Builds the ILP problem, runs Popper, classifies with clingo, routes learning to a backend (`learn_dispatch`), NL translation and explanations |
+| `icarus/ilp.py` | Builds the ILP problem, runs Popper, classifies with clingo, routes learning to a backend (`learn_dispatch`) |
+| `icarus/explain.py` | Rule and molecule explanations (chebILP's explainability pipeline) and the unfolded rule for the block editor |
 | `icarus/aleph.py` | Aleph backend (chebILP `aleph_runner`), renames the learned head to `concept` |
 | `icarus/llm_rulegen.py` | LLM backend: chebILP's `RuleGenerator`, run on the session molecules |
 | `icarus/llm_guard.py` | Rate limits, prompt-size cap, time limit and prompt log around the model call |

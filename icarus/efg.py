@@ -36,7 +36,7 @@ def is_efg(name: str) -> bool:
 def vocabulary() -> tuple[tuple[str, str], ...]:
     """``((efg_<name>, description), …)`` for every group, as chebILP's
     ``efg_fg_vocabulary`` builds it (description ``<group>: <text>``)."""
-    from chebILP.molecule_processing.fg_matching import _efg_pred_name
+    from chebILP.preprocessing.chebi.fg_matching import _efg_pred_name
 
     with open(EFG_DESCRIPTIONS_PATH, encoding="utf-8", newline="") as fh:
         texts = {r["Name"]: r["Description"] for r in csv.DictReader(fh, delimiter="\t")
@@ -59,7 +59,7 @@ def descriptions() -> dict[str, str]:
 
 @functools.lru_cache(maxsize=1)
 def _patterns() -> dict[str, tuple[list, list]]:
-    from chebILP.molecule_processing.fg_matching import _load_efg_patterns
+    from chebILP.preprocessing.chebi.fg_matching import _load_efg_patterns
 
     return {name: (reject, accept) for name, reject, accept in _load_efg_patterns(EFG_PATH)}
 
@@ -123,7 +123,7 @@ def install() -> None:
     """Point chebILP's ``efg`` seed source at the vendored tables (vocabulary + matcher),
     so ``seed_fg_library(..., "efg")`` and the LLM pipeline's grounding of reused EFG
     predicates work regardless of the working directory."""
-    from chebILP.molecule_processing import fg_matching as fm
+    from chebILP.preprocessing.chebi import fg_matching as fm
 
     src = fm.FG_SEED_SOURCES.get("efg")
     if src is None or getattr(src.matcher, "_icarus", False):

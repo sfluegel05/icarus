@@ -179,9 +179,16 @@ class Session:
             inchi = None
         return self.add_molecule(canonical, name or canonical, None, label, mol, inchi=inchi)
 
-    def add_from_text(self, text: str, label: str) -> tuple[list[Molecule], list[str]]:
-        """Parse one-or-more SMILES/InChI lines and add them. Returns (added, errors)."""
-        added, errors = [], []
+    def add_from_text(self, text: str, label: str
+                      ) -> tuple[list[Molecule], list[tuple[Molecule, str]], list[str]]:
+        """Parse one-or-more SMILES/InChI lines and add them.
+
+        Returns (added, duplicates, errors). ``duplicates`` holds ``(molecule,
+        previous label)`` for structures already in the session (e.g. seeded from
+        ChEBI under their name): those are relabelled, not added a second time."""
+        known = {mid: m.label for mid, m in self.molecules.items()}
+        added, duplicates, errors = [], [], []
+        seen = set()
         for raw in text.splitlines():
             s = raw.strip()
             if not s:
@@ -189,9 +196,15 @@ class Session:
             m = self.add_from_structure(s, label)
             if m is None:
                 errors.append(s)
+            elif m.id in seen:
+                continue  # the same structure twice in one request
+            elif m.id in known:
+                duplicates.append((m, known[m.id]))
             else:
                 added.append(m)
-        return added, errors
+            if m is not None:
+                seen.add(m.id)
+        return added, duplicates, errors
 
     def remove(self, mol_id: str) -> bool:
         m = self.molecules.pop(mol_id, None)

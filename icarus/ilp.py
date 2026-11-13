@@ -7,7 +7,6 @@ pipeline.
 """
 
 import contextlib
-import inspect
 import json
 import os
 import re
@@ -15,13 +14,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import types
 
 import pandas as pd
 
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
-from chebILP.ilp_problem_builder import build_background_chemlog
-from chebILP.utils import split_prolog_literals
+from chebILP.preprocessing.chebi.mol_to_fol import build_background_chemlog
 
 from . import config
 
@@ -40,20 +37,18 @@ def build_background(mols) -> tuple[list[str], list[tuple[str, int]]]:
     if not mols:
         return [], []
     rows = _rows(mols)
-    lines, body_predicates = build_background_chemlog(rows, predicate_set="atoms")
+    lines, body_predicates = build_background_chemlog(rows)
     # The computed facts are numeric (mol_weight(M,146)), so they are not offered to
     # Popper/Aleph as body predicates; they're there for library rules built on them.
     return lines + computed_facts(rows), body_predicates
 
-
-_COMPUTED_FACTS_RE = re.compile(r"\b(mol_weight|ring_size)\s*\(")
 
 
 def computed_facts(rows) -> list[str]:
     """``mol_weight(M,W)`` / ``ring_size(M,S)`` facts for ``rows`` (chebILP's
     ``build_computed_facts``). Many library predicates were generated with these facts
     available; without them such a predicate never fires (or, negated, always does)."""
-    from chebILP.ilp_problem_builder import build_computed_facts
+    from chebILP.preprocessing.chebi.mol_to_fol import build_computed_facts
 
     rows = rows[rows["mol"].notna()]
     return build_computed_facts(rows) if len(rows) else []
@@ -88,7 +83,7 @@ def _library_entries() -> list[dict]:
         return []
     mtime = os.stat(progs_dir).st_mtime
     if _LIB_ENTRIES is None or _LIB_ENTRIES[0] != mtime:
-        from chebILP.molecule_processing.fg_matching import is_fg_seed_name
+        from chebILP.preprocessing.chebi.fg_matching import is_fg_seed_name
         from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
         entries = HybridPredicateRetriever.from_rule_library(
@@ -437,8 +432,7 @@ _HEAD_RE = re.compile(r"^([a-z_][A-Za-z0-9_]*)\s*\(")
 def _split_clauses(rule: str) -> list[str]:
     """Split a program into individual clauses on the ``.`` terminators at bracket
     depth 0 (so ``.`` inside aggregates/ranges never splits), dropping ``%`` comment
-    lines and collapsing each clause to a single line — chebILP's translator parses
-    one clause per line."""
+    lines and collapsing each clause to a single line."""
     text = "\n".join(l for l in rule.splitlines() if not l.strip().startswith("%"))
     depth, cur, clauses = 0, [], []
     for ch in text:
@@ -464,11 +458,6 @@ def _clause_head(clause: str) -> str | None:
     return m.group(1) if m else None
 
 
-# NL per rule text. The state is re-sent after every UI action (relabel, remove, …),
-# and re-translating an unchanged rule each time slowed those round-trips.
-_NL_CACHE: dict[tuple, str | None] = {}
-_LIB_DESCRIPTIONS: dict[str, str] | None = None
-
 _HEADER_RE = re.compile(r"^%\s*(PREDICATE_NAME|DESCRIPTION)\s*:\s*(.+?)\s*$", re.IGNORECASE)
 
 
@@ -485,6 +474,10 @@ def rule_aux_descriptions(rule: str) -> dict[str, str]:
             name = m.group(2)
         elif name:
             out[name] = m.group(2)
+            # A header may name the predicate without its aux_ prefix (chebILP writes
+            # the model's name as given); the clauses always carry the prefix.
+            if not name.startswith(("aux_", "efg_")):
+                out.setdefault("aux_" + name, m.group(2))
     return out
 
 
@@ -493,86 +486,18 @@ def _aux_header(name: str, descriptions: dict[str, str]) -> str:
     return f"% PREDICATE_NAME: {name}\n% DESCRIPTION: {desc}\n" if desc else ""
 
 
-def _library_descriptions() -> dict[str, str]:
-    """Descriptions of the (read-only) library's aux predicates, loaded once."""
-    global _LIB_DESCRIPTIONS
-    if _LIB_DESCRIPTIONS is None:
-        try:
-            from chebILP.explainability.rule_to_nl import load_aux_descriptions
-            _LIB_DESCRIPTIONS = load_aux_descriptions(config.LLM_LIBRARY_DIR)
-        except Exception:
-            _LIB_DESCRIPTIONS = {}
-    return _LIB_DESCRIPTIONS
+def library_descriptions() -> dict[str, str]:
+    """``aux_name -> description`` for the (read-only) library's predicates."""
+    return {e["name"]: e.get("description") or "" for e in _library_entries()}
 
 
-def _translate_one(rule_text: str, extra: dict[str, str] | None = None) -> str | None:
-    """NL for a *single-head* rule via chebILP's ``translate_rule``, annotating any
-    ``aux_`` references with their descriptions from the predicate library, or from
-    ``extra`` (the descriptions the full rule carries in its headers)."""
-    if not rule_text:
-        return None
-    key = (rule_text, tuple(sorted((extra or {}).items())))
-    if key not in _NL_CACHE:
-        _NL_CACHE[key] = _translate_uncached(rule_text, extra or {})
-    return _NL_CACHE[key]
+def rule_parts(rule: str) -> dict | None:
+    """Decompose a rule into its main hypothesis and the auxiliary predicates it defines.
 
-
-def _efg_as_aux(rule_text: str) -> tuple[str, dict[str, str]]:
-    """``rule_text`` with each ``efg_<x>`` renamed to an ``aux_``-style alias, plus the
-    aliases' descriptions. chebILP's NL translator and explainer only phrase ``aux_*``
-    predicates readably ("has the property 'carboxylic acids' (…)"); anything else
-    comes out as raw ``efg_x(A)``."""
-    from . import efg
-
-    aliases = _efg_aliases(rule_text)
-    if not aliases:
-        return rule_text, {}
-    descs = efg.descriptions()
-    pat = re.compile(r"\b(" + "|".join(map(re.escape, aliases)) + r")\b(?=\s*\()")
-    # The label already names the group ("carboxylic acids"); describe it with the
-    # definition text after the "<group>: " prefix.
-    return (pat.sub(lambda m: aliases[m.group(1)], rule_text),
-            {a: "functional group: " + descs[n].split(":", 1)[-1].strip()
-             for n, a in aliases.items()})
-
-
-def _efg_aliases(rule_text: str) -> dict[str, str]:
-    """``efg_<x> -> aux_<x>`` for the groups ``rule_text`` uses (``aux_efg_<x>`` if the
-    rule already uses an ``aux_<x>`` of its own)."""
-    from . import efg
-
-    taken = set(re.findall(r"\baux_[A-Za-z0-9_]*", rule_text))
-    out = {}
-    for n in efg.referenced(rule_text):
-        alias = "aux_" + n[len("efg_"):]
-        out[n] = alias if alias not in taken else "aux_" + n
-    return out
-
-
-def _translate_uncached(rule_text: str, extra: dict[str, str]) -> str | None:
-    try:
-        from chebILP.explainability.rule_to_nl import translate_rule
-    except Exception:
-        return None
-    rule_text, efg_descs = _efg_as_aux(rule_text)
-    kwargs = {}
-    if "aux_descriptions" in inspect.signature(translate_rule).parameters:
-        kwargs["aux_descriptions"] = {**_library_descriptions(), **extra, **efg_descs}
-    try:
-        return translate_rule(rule_text, **kwargs)
-    except Exception:
-        return None
-
-
-def rule_to_nl_parts(rule: str) -> dict | None:
-    """Decompose a rule into its main hypothesis and auxiliary predicates, each with
-    its own NL translation.
-
-    chebILP's ``translate_rule`` handles one head predicate at a time (it rejects a
-    program mixing ``concept`` with ``aux_*`` definitions), so an LLM-generated rule —
-    the concept hypothesis plus the auxiliary predicates it builds on — must be split
-    by head and translated piecewise. Returns ``{"main": {head, rule, nl}, "aux":
-    [{name, rule, nl}, ...]}`` (aux empty for a plain Popper/Aleph rule), or ``None``.
+    Returns ``{"main": {head, rule}, "aux": [{name, description, rule}, ...]}`` (aux
+    empty for a plain Popper/Aleph rule), or ``None``. This is the rule's own structure,
+    as the logic-program view shows it; the explanation (:mod:`icarus.explain`) shows it
+    with the auxiliary predicates unfolded.
     """
     if not rule:
         return None
@@ -590,239 +515,15 @@ def rule_to_nl_parts(rule: str) -> dict | None:
 
     # The main hypothesis is the target predicate; everything else is auxiliary.
     main_head = TARGET if TARGET in groups else order[-1]
-    # A hypothesis that only renames one auxiliary predicate (concept(A) :- aux_x(A).)
-    # is shown with that predicate's definition inlined instead.
-    main_clauses, unfolded = _unfold_single_literals(groups[main_head], groups, main_head)
-    main_text = "\n".join(main_clauses)
-    # Auxiliary predicates still used (directly or transitively) after the inlining.
-    used = _referenced_heads(main_clauses, groups) if unfolded else set(groups)
     descriptions = rule_aux_descriptions(rule)
-    parts = {
-        "main": {"head": main_head, "rule": main_text,
-                 "nl": _translate_one(main_text, descriptions), "unfolded": unfolded},
-        "aux": [],
-    }
-    for name in order:
-        if name == main_head or name not in used:
-            continue
-        text = "\n".join(groups[name])
-        # The aux box keeps the description header, so a rule the UI reassembles from
+    return {
+        "main": {"head": main_head, "rule": "\n".join(groups[main_head])},
+        # Each aux box keeps the description header, so a rule the UI reassembles from
         # the boxes still carries it.
-        parts["aux"].append({"name": name, "rule": _aux_header(name, descriptions) + text,
-                             "nl": _translate_one(text, descriptions)})
-    return parts
-
-
-_VAR_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Za-z0-9_]*|_[A-Za-z0-9_]+)")
-_SINGLE_CALL_RE = re.compile(r"^([a-z][A-Za-z0-9_]*)\s*\((.*)\)$")
-_MAX_UNFOLD_DEPTH = 5
-
-
-def _clause_parts(clause: str) -> tuple[str, str]:
-    """``(head, body)`` of a clause, without the final ``.`` (body ``""`` for a fact)."""
-    head, _, body = clause.rstrip().rstrip(".").partition(":-")
-    return head.strip(), body.strip()
-
-
-def _call_args(literal: str) -> list[str] | None:
-    m = _SINGLE_CALL_RE.match(literal.strip())
-    if not m:
-        return None
-    inner = m.group(2).strip()
-    return [a.strip() for a in split_prolog_literals(inner)] if inner else []
-
-
-def _is_var(term: str) -> bool:
-    return bool(re.fullmatch(r"[A-Z][A-Za-z0-9_]*", term))
-
-
-def _inline(call_args: list[str], definition: str, taken: set[str]) -> str | None:
-    """The body of ``definition`` (one clause of the called predicate) with its head
-    variables replaced by ``call_args``; its other variables are renamed where they
-    would clash with ``taken`` (the calling clause's variables). ``None`` if the
-    definition's head isn't a list of distinct variables matching the call."""
-    head, body = _clause_parts(definition)
-    params = _call_args(head)
-    if not body or params is None or len(params) != len(call_args) \
-            or not all(_is_var(p) for p in params) or len(set(params)) != len(params):
-        return None
-    mapping = dict(zip(params, call_args))
-    used = set(taken) | set(call_args)
-    for v in dict.fromkeys(_VAR_TOKEN_RE.findall(body)):
-        if v in mapping:
-            continue
-        new, i = v, 1
-        while new in used:
-            new, i = f"{v}{i}", i + 1
-        mapping[v] = new
-        used.add(new)
-    return _VAR_TOKEN_RE.sub(lambda m: mapping.get(m.group(1), m.group(1)), body)
-
-
-def _unfold_single_literals(clauses: list[str], groups: dict[str, list[str]],
-                            main_head: str) -> tuple[list[str], list[str]]:
-    """Inline a hypothesis clause whose whole body is one call to a predicate the rule
-    defines: ``concept(A) :- aux_b(A).`` + ``aux_b(X) :- c(X), d(X).`` becomes
-    ``concept(A) :- c(A), d(A).`` (one clause per definition clause; repeated while the
-    result is again a single call). Equivalent under ASP semantics. Returns the new
-    clauses and the names that were inlined."""
-    unfolded: list[str] = []
-    for _ in range(_MAX_UNFOLD_DEPTH):
-        out, changed = [], False
-        for clause in clauses:
-            head, body = _clause_parts(clause)
-            lits = split_prolog_literals(body) if body else []
-            args = _call_args(lits[0]) if len(lits) == 1 else None
-            name = _SINGLE_CALL_RE.match(lits[0].strip()).group(1) if args is not None else None
-            defs = groups.get(name) if name and name != main_head else None
-            # Recursive predicates (calling themselves) stay as they are.
-            if defs and args and all(_is_var(a) for a in args) \
-                    and not any(re.search(rf"\b{re.escape(name)}\s*\(", _clause_parts(d)[1])
-                                for d in defs):
-                taken = set(_VAR_TOKEN_RE.findall(head))
-                bodies = [_inline(args, d, taken) for d in defs]
-                if all(b is not None for b in bodies):
-                    out += [f"{head} :- {b}." for b in bodies]
-                    unfolded.append(name)
-                    changed = True
-                    continue
-            out.append(clause)
-        clauses = out
-        if not changed:
-            break
-    return clauses, list(dict.fromkeys(unfolded))
-
-
-def _referenced_heads(clauses: list[str], groups: dict[str, list[str]]) -> set[str]:
-    """Names in ``groups`` the clauses use, transitively."""
-    seen: set[str] = set()
-    pending = list(clauses)
-    while pending:
-        _head_text, body = _clause_parts(pending.pop())
-        for name in re.findall(r"\b([a-z][A-Za-z0-9_]*)\s*\(", body):
-            if name in groups and name not in seen:
-                seen.add(name)
-                pending += groups[name]
-    return seen
-
-
-_ANON_VAR_RE = re.compile(r"(?<![A-Za-z0-9_])_(?![A-Za-z0-9_])")
-
-
-def _name_anonymous_vars(clause: str) -> str:
-    """Replace each anonymous ``_`` in a positive body literal with a fresh named variable.
-
-    xclingo copies positive body literals into the heads of its generated
-    support rules, where an anonymous variable becomes unsafe and grounding
-    fails. A variable that occurs only once has the same meaning as ``_``.
-    Negated literals keep their ``_``: there a named variable would be unsafe.
-    """
-    if ":-" not in clause:
-        return clause
-    head, body = clause.split(":-", 1)
-    counter = iter(range(1, 1_000_000))
-    lits = [lit if lit.startswith("not ")
-            else _ANON_VAR_RE.sub(lambda _m: f"AnonV{next(counter)}", lit)
-            for lit in split_prolog_literals(body.strip().rstrip("."))]
-    return f"{head.strip()} :- {', '.join(lits)}."
-
-
-def _xclingo_ready_rule(smiles: str, rule: str, mol_id: str) -> str:
-    """Rewrite ``rule`` into a form chebILP's xclingo explainer can handle.
-
-    Anonymous variables in positive body literals get names, and every clause
-    with an aggregate (``#count`` etc.) is replaced by the ground facts it
-    derives for this molecule: xclingo finds no explanation at all through an
-    aggregate, so such a predicate is cited as a given property instead (for a
-    target clause, via a helper predicate the target is bridged to). Target
-    clauses come last. Returns one clause per line, as chebILP parses the rule
-    line by line.
-    """
-    import clingo
-    from rdkit import Chem
-
-    from . import efg
-
-    # Functional groups are RDKit matches: cite each one the molecule has as a given
-    # fact, under its readable aux-style alias (see _efg_as_aux).
-    efg_facts = []
-    aliases = _efg_aliases(rule)
-    if aliases:
-        mol = Chem.MolFromSmiles(smiles)
-        rule, _descs = _efg_as_aux(rule)
-        if mol is not None:
-            one = types.SimpleNamespace(id=mol_id, mol=mol, smiles=smiles)
-            efg_facts = [aliases[f.split("(", 1)[0]] + "(" + f.split("(", 1)[1]
-                         for f in efg.fact_lines([one], list(aliases))]
-
-    # chebILP's explainer builds the atom-level background only; a rule using the
-    # computed facts (mol_weight / ring_size) gets them for this molecule as givens.
-    extra_facts = []
-    if _COMPUTED_FACTS_RE.search(rule):
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is not None:
-            extra_facts = computed_facts(pd.DataFrame([{"mol": mol}], index=[mol_id]))
-
-    clauses = efg_facts + extra_facts + _split_clauses(rule)
-    agg = [c for c in clauses if ":-" in c and "#" in c.split(":-", 1)[1]]
-    # Aggregate clauses are ground by plain clingo below, so they keep their ``_``.
-    clauses = [c if c in agg else _name_anonymous_vars(c) for c in clauses]
-    # chebILP explains the head of the last clause, so the target clauses go last.
-    clauses.sort(key=lambda c: _clause_head(c) == TARGET)
-    mol = Chem.MolFromSmiles(smiles)
-    if not agg or mol is None:  # invalid SMILES: let chebILP raise its error
-        return "\n".join(clauses)
-
-    # A target clause is not replaced by facts itself (chebILP would then explain some
-    # other predicate): its aggregate body becomes a helper, the target a bridge to it.
-    helper = f"aux_{TARGET}_condition"
-    target_agg = [c for c in agg if _clause_head(c) == TARGET]
-    agg_facts_src = [re.sub(rf"^\s*{TARGET}\s*\(", f"{helper}(", c, count=1) if c in target_agg else c
-                     for c in agg]
-
-    # Same background chebILP's explainer builds, so atom ids line up.
-    mol_df = pd.DataFrame([{"mol": mol}], index=[mol_id])
-    bk_lines, _ = build_background_chemlog(mol_df)
-    ctl = clingo.Control(["--warn=none"])
-    ctl.add("base", [], "\n".join(bk_lines + [c for c in clauses if c not in agg] + agg_facts_src))
-    ctl.ground([("base", [])])
-    agg_heads = {_clause_head(c) for c in agg_facts_src}
-    facts: list[str] = []
-    with ctl.solve(yield_=True) as handle:
-        for model in handle:
-            facts = sorted(f"{s}." for s in model.symbols(atoms=True) if s.name in agg_heads)
-            break
-    bridge = [f"{TARGET}(M) :- {helper}(M)."] if target_agg else []
-    return "\n".join(facts + [c for c in clauses if c not in agg] + bridge)
-
-
-def explain_molecule(smiles: str, rule: str) -> dict:
-    """Graphical + textual explanation of why the rule classifies a molecule positive.
-
-    Returns ``{satisfies, text, image}`` where ``image`` is a base64 PNG data URL
-    with the atoms cited in the explanation highlighted (chebILP + xclingo).
-    """
-    import base64
-    import io
-
-    from chebILP.explainability.explain import explain_molecule as _explain
-
-    satisfies, text, img = _explain(smiles, _xclingo_ready_rule(smiles, rule, "mol1"), mol_id="mol1")
-
-    # The generic target predicate is "concept"; rewrite chebILP's CHEBI-oriented
-    # phrasing into concept-neutral text.
-    if satisfies:
-        marker = "because it satisfies the following conditions:"
-        conds = text.split(marker, 1)[1].strip() if marker in text else ""
-        text = ("This molecule matches the learned concept because it satisfies:\n" + conds
-                if conds else "This molecule matches the learned concept.")
-    else:
-        text = "This molecule does not match the learned concept."
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return {"satisfies": satisfies, "text": text, "image": "data:image/png;base64," + b64}
+        "aux": [{"name": name, "description": descriptions.get(name, ""),
+                 "rule": _aux_header(name, descriptions) + "\n".join(groups[name])}
+                for name in order if name != main_head],
+    }
 
 
 class RuleError(Exception):

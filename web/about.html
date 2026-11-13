@@ -118,12 +118,12 @@
       <p>
         Rules are evaluated with <a href="https://potassco.org/clingo/" target="_blank" rel="noopener">clingo</a>,
         an answer set programming solver. ICaRuS shows a confusion matrix and
-        lists the molecules the rule misclassifies. Each rule is also translated
-        into plain language. For every molecule the rule marks as positive, the
-        "?" button opens an explanation built with
-        <a href="https://github.com/bramucas/xclingo2" target="_blank" rel="noopener">xclingo</a>,
-        with the responsible atoms highlighted. The rule history keeps earlier
-        rules so you can compare them.
+        lists the molecules the rule misclassifies. Each rule is also explained with a
+        picture of the pattern it looks for and a short sentence, and the rule editor
+        shows it with its auxiliary predicates unfolded. For every molecule, the "?" button explains why the rule
+        accepts it (the matching atoms highlighted) or rejects it (the closest match and
+        where it fails). The explanations are built with chebILP's explainability pipeline. The rule
+        history keeps earlier rules so you can compare them.
       </p>
     </section>
   </main>

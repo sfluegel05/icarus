@@ -133,33 +133,42 @@
         <em>Concept definition</em> box shows the ChEBI definition, and you can edit it
         before learning. If the rule library already has a rule for the class, that rule is
         shown first, and <em>Prompt the LLM</em> asks the model for a fresh one. 
-        Both the ILP learners and the LLM have access to a library of LLM-generated chemical concepts 
-        that they can use as building blocks for new definitions.
+        Both the ILP learners and the LLM have access to a library of LLM-generated chemical concepts
+        that they can use as building blocks for new definitions. Under <em>Settings</em> you choose
+        which library predicates the learner may use: generated predicates (aux) and functional
+        groups (EFG). In this session the functional groups were switched off, so Popper built the
+        rule from a generated predicate, which the editor can show atom by atom. (With functional
+        groups on, Popper picks the ready-made <em>Carboxylic acids</em> group instead.)
       </p>
       <p>
         When the run finishes, the rule appears below, with a result summary.
         The result shows:
       </p>
       <ul>
-        <li><strong>Build the rule</strong> — the rule as blocks (the molecule-level property, and atoms with their bonds).</li>
-        <li><strong>In words</strong> — a natural-language translation of the rule.</li>
+        <li><strong>Build the rule</strong> — the rule as blocks (the molecule-level property, and atoms with their bonds),
+          with any auxiliary predicates unfolded into their definitions. A pattern the molecule
+          must not contain sits in a red <em>not</em> box, and a pattern that has to occur a
+          certain number of times sits in a purple <em>count</em> box.</li>
+        <li><strong>What the rule asks for</strong> — a picture of the pattern the rule looks for,
+          with a short sentence.</li>
         <li>
           The confusion counts (TP, TN, FP, FN) and the list of molecules
           <em>not classified as told</em>. A false positive (FP) is a negative example the rule
-          marks positive; a false negative (FN) is the reverse. A molecule that the rule
-          marks positive has a <kbd>?</kbd> button on its card.
+          marks positive; a false negative (FN) is the reverse. Every molecule has a
+          <kbd>?</kbd> button on its card (grey if the rule rejects it).
         </li>
       </ul>
       <figure class="tut-fig">
-        <img class="tut-shot" src="static/tutorial/04-learned-rule.png" alt="Learned rule with block editor, natural-language translation, confusion counts and mismatches">
-        <figcaption>The learned rule, its translation, the confusion counts, and the one misclassified molecule.</figcaption>
+        <img class="tut-shot" src="static/tutorial/04-learned-rule.png" alt="Learned rule with block editor, rule explanation, confusion counts and mismatches">
+        <figcaption>The learned rule: an O=C–OH or S=C–OH group, as two OR alternatives. All examples are classified as told.</figcaption>
       </figure>
       <p>
-        Click <kbd>?</kbd> on a positive molecule to see why the rule accepts it. The
-        explanation highlights the responsible atoms and lists the facts that match.
+        Click <kbd>?</kbd> on a molecule to see why the rule accepts or rejects it. For an
+        accepted molecule, the explanation highlights the atoms that match the rule. For a
+        rejected one, it highlights the closest match and marks where it fails.
       </p>
       <figure class="tut-fig">
-        <img class="tut-shot tut-shot-narrow" src="static/tutorial/04-explain.png" alt="Explanation dialog for why a molecule is positive">
+        <img class="tut-shot tut-shot-narrow" src="static/tutorial/04-explain.png" alt="Explanation dialog for why the rule accepts a molecule">
         <figcaption>The explanation for a positive prediction.</figcaption>
       </figure>
     </section>
@@ -169,20 +178,30 @@
       <h2>5 · Edit the rule and apply it</h2>
       <p>
         You can change the rule in two ways. Drag blocks from the palette onto the molecule
-        or an atom in the <em>Rule</em> canvas, or open <em>Advanced: edit as Prolog</em> and
+        or an atom in the <em>Rule</em> canvas, or open <em>Logic program</em> and
         edit the text directly. Edited Prolog is parsed back into blocks when you click away.
-        Auxiliary predicates (LLM-generated helpers that summarize chemical subconcepts) are listed below
-        the editor and can be edited as Prolog as well.
       </p>
       <p>
-        In this session the learned rule consisted of one literal, and the manual edit appended a condition: the
-        molecule must also contain a nitrogen atom. Click <em>Apply edited rule</em> to run
+        <em>+ not box</em> and <em>+ count box</em> add a box to the canvas. Drag atoms into
+        a box (or drop atom properties onto it) to build its pattern. Bonds may connect
+        atoms in a box to atoms outside it. A <em>not</em> box means the molecule has no match
+        of its pattern. A <em>count</em> box sets how many matches there must be (exactly, at
+        least, at most, …). It counts the different atoms marked <kbd>#</kbd>, so with a
+        counted carbon and an unmarked oxygen it counts carbons that have such an oxygen. For
+        molecule-level properties, <em>+ not</em> in the <em>Whole molecule</em> strip adds a
+        not box there, and <kbd>¬</kbd> on an atom's property negates just that property.
+        The logic program also lists the auxiliary predicates the rule defines (LLM-generated
+        helpers that summarize chemical subconcepts), as written, and they can be edited there too.
+      </p>
+      <p>
+        In this session the edit added a not box with a nitrogen atom to both alternatives: the
+        molecule must not contain any nitrogen. Click <em>Apply edited rule</em> to run
         the edited rule. Its result becomes a new entry in the history, and ICaRuS lists every
         classification that changed.
       </p>
       <figure class="tut-fig">
         <img class="tut-shot" src="static/tutorial/05-applied-edit.png" alt="Rule area after applying an edit, showing new confusion counts and changed classifications">
-        <figcaption>After applying the edit: the new counts, the newly misclassified molecules, and the list of changed classifications.</figcaption>
+        <figcaption>After applying the edit: glycine and glycine-d5 contain nitrogen, so the rule now rejects them (two false negatives).</figcaption>
       </figure>
       <p>
         <em>Revert edits</em> discards unsaved changes and restores the selected rule.
@@ -195,15 +214,14 @@
       <p>
         A rule is only as good as its examples. Use the steps above to improve them: add
         SMILES, move molecules between the columns, remove doubtful ones, or label more
-        suggestions. In our run, the rule marked glyoxylate as positive although it was
-        labelled negative; relabelling it or leaving it as the one error are both valid
-        decisions, depending on your concept.
+        suggestions.
       </p>
       <p>
-        In this session acrylic acid (positive) and hexane (negative) were added, and then
+        In this session benzoic acid (positive) and hexane (negative) were added by SMILES, and then
         <em>Learn rule</em> was clicked again. Each learning run adds a new entry to the
         history and makes it the selected rule. The result depends on the examples, so the
-        learner can return a different rule than before.
+        learner can return a different rule than before. Here it returned the same rule, which
+        also classifies the two new molecules correctly.
       </p>
       <figure class="tut-fig">
         <img class="tut-shot" src="static/tutorial/06-relearned-rule.png" alt="Rule area after learning again with more examples">

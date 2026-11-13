@@ -19,12 +19,13 @@ import traceback
 import types
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 
-from . import config, data_store, efg, ilp, llm_guard, predicates, render, similarity
+from . import config, data_store, efg, explain, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
 
 
@@ -118,8 +119,28 @@ def state_dict(s: Session) -> dict:
     }
     if s.current_rule:
         out["report"] = _report(s, preds)
-        out["rule_parts"] = ilp.rule_to_nl_parts(s.current_rule)
+        out["rule_parts"] = parts = ilp.rule_parts(s.current_rule)
+        if parts:
+            # The block editor shows the hypothesis with its auxiliary predicates
+            # unfolded; the logic-program view shows the rule as written.
+            parts["main"]["editor"] = _editor_rule(s.current_rule)
     return out
+
+
+def _editor_rule(rule: str) -> str | None:
+    try:
+        return explain.editor_rule(rule)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+async def rule_unfold(request: Request):
+    """The block-editor form (auxiliary predicates unfolded) of a rule edited in the
+    logic-program view; the client sends the program it would apply."""
+    body = await request.json()
+    rule = ilp.expand_aux_definitions((body.get("rule") or "").strip())
+    return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule)})
 
 
 def _int(v, default, lo, hi):
@@ -139,6 +160,8 @@ _MAX_CLASS_EXAMPLES = 100
 _MAX_ADD_LINES = 200
 _MAX_IMPORT_MOLECULES = 1000
 _MAX_IMPORT_RULES = 200
+
+_LABEL_GROUPS = {"pos": "positives", "neg": "negatives", "unlabeled": "unlabeled"}
 
 
 def ok(s: Session, recompute: bool = True, **extra):
@@ -222,26 +245,41 @@ async def depict(request: Request):
 
 
 @with_session
-async def explain(request: Request, s: Session):
-    """Explain why the current rule classifies a session molecule as positive."""
+async def explain_molecule(request: Request, s: Session):
+    """Explain why the current rule does or does not accept a session molecule."""
     mid = request.query_params.get("id", "")
     # Snapshot the molecule + rule under the lock, then run the (slow) explanation
     # outside it so a concurrent reset/remove can't race the read.
     with s.lock:
         m = s.molecules.get(mid)
         rule = s.current_rule
-        smiles = m.smiles if m else None
-        name = m.name if m else None
     if m is None:
         return JSONResponse({"error": "Unknown molecule."}, status_code=404)
     if not rule:
         return JSONResponse({"error": "No rule yet."}, status_code=400)
     try:
-        data = ilp.explain_molecule(smiles, rule)
+        data = await run_in_threadpool(explain.explain_molecule, m.mol, rule, m.name)
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"error": f"Could not build explanation: {e}"}, status_code=500)
-    data["name"] = name
+    data["name"] = m.name
+    return JSONResponse(data)
+
+
+@with_session
+async def explain_rule(request: Request, s: Session):
+    """What the current rule asks of a molecule: picture + text, and the rule with its
+    auxiliary predicates unfolded. Fetched separately from the state, which is re-sent
+    after every action, because drawing the picture takes a moment."""
+    with s.lock:
+        rule = s.current_rule
+    if not rule:
+        return JSONResponse({"error": "No rule yet."}, status_code=400)
+    try:
+        data = await run_in_threadpool(explain.explain_rule, rule)
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"error": f"Could not explain the rule: {e}"}, status_code=500)
     return JSONResponse(data)
 
 
@@ -353,11 +391,20 @@ async def session_add(request: Request, s: Session):
         return JSONResponse({"error": f"At most {_MAX_ADD_LINES} molecules per request."},
                             status_code=400)
     with s.lock:
-        added, errors = s.add_from_text(text, label)
+        added, duplicates, errors = s.add_from_text(text, label)
         msg = f"Added {len(added)} molecule(s)."
+        if duplicates:
+            names = []
+            for m, prev in duplicates[:5]:
+                moved = f" (moved from {_LABEL_GROUPS.get(prev, prev)})" if prev != m.label else ""
+                names.append(f"{m.name}{moved}")
+            more = f" and {len(duplicates) - 5} more" if len(duplicates) > 5 else ""
+            msg += f" Already in the examples: {', '.join(names)}{more}."
         if errors:
             msg += f" Could not parse: {', '.join(errors[:5])}"
-        return ok(s, message=msg)
+        # The client highlights these cards, so a duplicate visibly points at the
+        # existing entry instead of seemingly vanishing.
+        return ok(s, message=msg, highlight=[m.id for m, _ in duplicates])
 
 
 @with_session
@@ -681,7 +728,9 @@ routes = [
     Route("/tutorial", tutorial),
     Route("/about", about),
     Route("/api/depict", depict),
-    Route("/api/explain", explain),
+    Route("/api/explain", explain_molecule),
+    Route("/api/rule/explain", explain_rule),
+    Route("/api/rule/unfold", rule_unfold, methods=["POST"]),
     Route("/api/state", api_state),
     Route("/api/predicates", api_predicates),
     Route("/api/predicates/search", api_predicates_search),

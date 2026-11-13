@@ -12,10 +12,11 @@ rdkit==2025.9.6
 pandas==3.0.1
 networkx==3.6.1
 clingo==5.8.0
-xclingo==2.0b14
 pillow==12.1.1
 python-dotenv
 chebi_utils==0.4
-chebILP[explain,llm]==1.2
+# chebILP, pinned to the explanation rewrite (feature/better-chebi-explanations) until
+# it is released on PyPI. Needs the refactored package layout (preprocessing.chebi).
+chebILP[explain,llm] @ git+https://github.com/ChEB-AI/chebILP@802ccbc52870da55a8f0a3e1d530e5d8a9279043
 # Popper (ILP engine), pinned to a tested upstream commit.
 popper @ git+https://github.com/logic-and-learning-lab/Popper@5c608d3ec87e4975866042fe326e9a317277e021

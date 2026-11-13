@@ -92,6 +92,11 @@ label { font-size: 12px; color: var(--muted); }
 }
 .struct-card:hover { box-shadow: 0 3px 12px rgba(0,0,0,.09); border-color: #cbd4dd; }
 .struct-card.drag-src { opacity: .4; }
+.struct-card.flash { animation: card-flash 1.6s ease-out 2; }
+@keyframes card-flash {
+  0% { box-shadow: 0 0 0 3px var(--accent); border-color: var(--accent); }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
 .example-col.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .struct-card .thumb { width: 100%; aspect-ratio: 1 / 0.82; display: block; }
 .struct-card .thumb img { width: 100%; height: 100%; object-fit: contain; }
@@ -175,17 +180,15 @@ label { font-size: 12px; color: var(--muted); }
   border: 1px solid #d3e2f2; border-radius: 8px; }
 .concept-box .rule-text { width: 100%; box-sizing: border-box; font-family: inherit; }
 .concept-box #concept-name { font-weight: 600; margin-bottom: 6px; }
-.aux-area { margin: 10px 0 4px; }
-#aux-toggle { font-size: 12px; }
+.aux-area { margin: 8px 0 10px; }
 .aux-list { margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
 .aux-item { border-left: 3px solid var(--border); padding-left: 10px; }
-.aux-name { font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--accent); }
-.rule-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: stretch; }
-.rule-split .rule-text { width: 100%; }
+.aux-name { font-size: 12px; font-weight: 600; margin-bottom: 2px; color: var(--accent); }
+.aux-desc { font-size: 12px; margin-bottom: 4px; }
+.aux-item .rule-text { width: 100%; }
 .rule-nl-box { background: var(--accent-bg); border: 1px solid #d3e2f2; border-radius: 8px; padding: 8px 12px; }
 .rule-nl-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); font-weight: 700; margin-bottom: 4px; }
 .rule-nl { font-size: 13px; line-height: 1.45; white-space: pre-line; }
-@media (max-width: 720px) { .rule-split { grid-template-columns: 1fr; } }
 
 /* ── building-block rule editor ─────────────────────────────────────────── */
 .block-editor { display: grid; grid-template-columns: 232px 1fr; gap: 14px; align-items: start; }
@@ -286,19 +289,72 @@ label { font-size: 12px; color: var(--muted); }
   padding: 0; cursor: pointer; }
 .chip-x:hover { color: var(--neg); }
 
-.add-atom { position: absolute; right: 6px; bottom: 6px; z-index: 3; padding: 3px 9px; font-size: 12px; }
+.canvas-actions { position: absolute; right: 6px; bottom: 6px; z-index: 3; display: flex; gap: 6px; }
+.canvas-actions button { padding: 3px 9px; font-size: 12px; background: #fff; }
+.bond-line.pseudo { stroke-dasharray: 6 4; }
+.atom-box.refused { animation: refuse .5s; }
+@keyframes refuse { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+
+/* negated property chips */
+.chip.neg { background: var(--neg-bg); border-color: #f0c4be; color: var(--neg); }
+.chip-not { background: transparent; border: none; color: var(--muted); font-size: 12px; line-height: 1;
+  padding: 0 1px; cursor: pointer; display: none; }
+.chip:hover .chip-not, .chip.neg .chip-not { display: inline; }
+.chip-not:hover { color: var(--neg); }
+.chip-unfold { background: transparent; border: none; color: var(--accent); font-size: 12px; line-height: 1;
+  padding: 0 1px; cursor: pointer; }
+.chip-unfold:hover { color: var(--text); }
+.chip-unfold:disabled { opacity: .4; cursor: progress; }
+
+/* not / count boxes: frames on the atom canvas (behind their atoms) */
+.group-frame { position: absolute; z-index: 0; border: 2px dashed; border-radius: 10px; }
+.group-frame.kind-not { border-color: var(--neg); background: rgba(192, 57, 43, .05); }
+.group-frame.kind-count { border-color: #7b4bb3; background: rgba(123, 75, 179, .05); }
+.group-frame.selected { box-shadow: 0 0 0 2px var(--accent); }
+.group-head { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 4px 6px;
+  font-size: 11px; border-bottom: 1px dashed rgba(0,0,0,.12); }
+.group-grip { cursor: grab; color: var(--muted); user-select: none; }
+.group-kind { font-weight: 800; text-transform: uppercase; letter-spacing: .05em; font-size: 10px;
+  padding: 1px 6px; border-radius: 4px; color: #fff; }
+.kind-not .group-kind, .mol-not .group-kind { background: var(--neg); }
+.kind-count .group-kind { background: #7b4bb3; }
+.group-desc { color: var(--muted); }
+.group-op { font-size: 11px; padding: 0 2px; }
+.group-n, .group-n2 { width: 46px; font-size: 11px; padding: 1px 4px; }
+.group-head .mini-btn.x { margin-left: auto; background: transparent; color: var(--muted); border: none;
+  font-size: 14px; line-height: 1; padding: 0 2px; cursor: pointer; }
+.group-head .mini-btn.x:hover { color: var(--neg); }
+.group-hint { padding: 10px; }
+.group-hint.warn { color: var(--warn); font-style: normal; }
+.group-resize { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,.25) 50%); border-radius: 0 0 8px 0; }
+.atom-box.in-not { border-color: var(--neg); }
+.atom-box.in-not .atom-head { background: var(--neg-bg); }
+.atom-box.in-count { border-color: #7b4bb3; }
+.atom-box.in-count .atom-head { background: #f1eaf9; }
+.atom-count { background: transparent; border: 1px solid #c9b6e4; border-radius: 4px; color: #b9a6d4;
+  font-size: 11px; font-weight: 700; padding: 0 4px; cursor: pointer; line-height: 15px; }
+.atom-count.on { background: #7b4bb3; border-color: #7b4bb3; color: #fff; }
+
+/* NOT box over molecule properties, inline in the molecule strip */
+.mol-not { display: inline-flex; align-items: center; gap: 4px; padding: 2px 5px; border: 2px dashed var(--neg);
+  border-radius: 8px; background: rgba(192, 57, 43, .05); }
+.mol-not .group-kind { padding: 0 5px; }
+.mol-add-not { padding: 1px 7px; font-size: 11px; margin-left: auto; }
 .add-clause { align-self: flex-start; padding: 5px 11px; font-size: 12px; }
 
 .clause-raw { padding: 4px 0; }
 .raw-note { font-size: 11px; color: var(--warn); margin-bottom: 4px; }
+.raw-why { color: var(--muted); }
 .raw-clause { width: 100%; }
 
 .advanced-prolog { margin: 12px 0 4px; }
 .advanced-prolog > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 .advanced-prolog #rule-text { width: 100%; margin-top: 6px; }
-.advanced-prolog .adv-hint { margin-top: 4px; }
+.advanced-prolog .adv-hint { margin: 4px 0 8px; }
+.advanced-prolog .rule-nl-label { margin-top: 6px; }
 
-/* "?" explain button on cards (predicted-positive only, always visible) */
+/* "?" explain button on cards (once a rule exists; grey when the rule rejects the molecule) */
 .struct-card .explain-btn {
   position: absolute; right: 5px; bottom: 24px;
   background: var(--accent); color: #fff; border: none; border-radius: 50%;
@@ -306,9 +362,9 @@ label { font-size: 12px; color: var(--muted); }
   cursor: pointer; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,.2);
 }
 .struct-card .explain-btn:hover { filter: brightness(1.1); }
+.struct-card .explain-btn.rejected { background: var(--muted); }
 .explain-struct { text-align: center; margin: 8px 0; }
 .explain-struct img { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
-.explain-text { white-space: pre-line; font-size: 13px; line-height: 1.5; background: var(--pos-bg); border-radius: 8px; padding: 10px 12px; }
 .confusion { display: flex; gap: 10px; margin: 14px 0; }
 .conf-cell { padding: 8px 14px; border-radius: 6px; text-align: center; min-width: 60px; }
 .conf-cell .n { font-size: 18px; font-weight: 700; display: block; }
@@ -356,6 +412,8 @@ label { font-size: 12px; color: var(--muted); }
   display: flex; align-items: center; justify-content: center; padding: 20px; }
 .modal-box { background: #fff; border-radius: 12px; max-width: 460px; width: 100%;
   padding: 18px 20px; position: relative; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+.modal-box.explain-box { max-width: 720px; max-height: calc(100vh - 40px); overflow-y: auto; }
+.explain-box h3 { margin: 0 24px 6px 0; font-size: 15px; }
 .modal-close { position: absolute; top: 8px; right: 10px; background: transparent;
   color: var(--muted); border: none; font-size: 22px; cursor: pointer; z-index: 1; }
 .modal-struct { width: 100%; height: 220px; display: flex; justify-content: center;
@@ -408,3 +466,15 @@ main.doc-main { max-width: 960px; }
 .tut-fig figcaption { font-size: 12px; color: var(--muted); margin-top: 4px; text-align: center; }
 .tut-shot { display: block; max-width: 100%; height: auto; margin: 0 auto; border: 1px solid var(--border); border-radius: 8px; }
 .tut-shot-narrow { max-width: min(480px, 100%); }
+
+/* learn settings (library predicate kinds) */
+.learn-settings { margin: -2px 0 10px; font-size: 12px; }
+.learn-settings summary { cursor: pointer; color: var(--muted); }
+.learn-settings .settings-note { margin: 4px 0 6px; }
+.learn-settings label.mini { margin-right: 14px; }
+.learn-settings input[type="checkbox"] { width: auto; vertical-align: middle; }
+
+/* rule explanation (picture + sentence) next to the block editor */
+.rule-explain img { display: block; max-width: 100%; height: auto; margin: 4px 0 4px;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.rule-explain .report-box { margin: 4px 0 10px; }

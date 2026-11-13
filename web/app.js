@@ -149,41 +149,83 @@ function render(state) {
 
   if (state.has_rule) {
     $("rule-area").classList.remove("hidden");
-    const parts = state.rule_parts ||
-      { main: { rule: state.current_rule, nl: null }, aux: [] };
+    const parts = state.rule_parts || { main: { rule: state.current_rule }, aux: [] };
     // Reload the block editor only when the selected rule actually changed, so an
     // in-progress edit isn't clobbered on every state refresh (adding examples etc.).
     const sig = `${state.selected_rule_id}|${state.has_rule}`;
     if (sig !== lastRuleSig) {
       lastRuleSig = sig;
-      Blocks.load(parts.main.rule || "");
+      // Blocks: the hypothesis with its auxiliary predicates unfolded. Logic program:
+      // the hypothesis as written.
+      $("rule-text").value = parts.main.rule || "";
       editorDirty = false;
-      syncAdvancedFromBlocks(true);
+      editSource = null;
+      loadEditorBlocks(sig, state.current_rule, parts.main.rule || "");
     }
-    $("rule-nl").textContent = parts.main.nl || "—";
+    loadRuleExplanation(state.current_rule);
     renderAux(parts.aux || []);
     renderReport(state.report);
     updateEditedFlag();
   } else {
     lastRuleSig = null;
+    explainedRule = null;
     $("rule-area").classList.add("hidden");
   }
   renderHistory(state);
 }
 
-// The block editor is canonical for the main hypothesis; these track when to
-// (re)load it and whether the user has unsaved edits (blocks, aux, or Prolog).
+// These track when to (re)load the editors, whether there are unsaved edits, and
+// which view was edited last ("blocks" or "program"): Apply saves that one.
 let lastRuleSig = null;
 let editorDirty = false;
+let editSource = null;
 
-function syncAdvancedFromBlocks(force) {
-  const ta = $("rule-text");
-  if (force || document.activeElement !== ta) ta.value = Blocks.compile();
+// The block editor shows the rule with its auxiliary predicates unfolded, which the
+// server computes on request (not in the state: it grounds with clingo). Until it
+// arrives the blocks show the hypothesis as written; a rule without auxiliary
+// predicates needs no request. Results are kept per rule text (revert, reselect).
+const editorRules = new Map();
+
+async function loadEditorBlocks(sig, rule, hypothesis) {
+  if (!/\baux_/.test(rule || "")) { Blocks.load(hypothesis); return; }
+  if (editorRules.has(rule)) { Blocks.load(editorRules.get(rule)); return; }
+  Blocks.load(hypothesis);
+  let data;
+  try { data = await api("api/rule/editor"); } catch (e) { return; }
+  if (!data.rule || data.source !== rule) return;
+  editorRules.set(rule, data.rule);
+  // Still the same rule, and not edited meanwhile.
+  if (lastRuleSig === sig && editSource === null) Blocks.load(data.rule);
 }
 
 function updateEditedFlag() {
   $("edited-flag").textContent =
     editorDirty ? "(unsaved edits — Apply to save as a new rule)" : "";
+}
+
+// ── rule explanation (chebILP) ──────────────────────────────────────────────
+// What the selected rule asks for: a picture with a sentence. Fetched once per rule
+// text, since drawing it takes a moment, not on every state refresh.
+let explainedRule = null;
+
+async function loadRuleExplanation(rule) {
+  if (rule === explainedRule) return;
+  explainedRule = rule;
+  const box = $("rule-explain");
+  box.innerHTML = `<div class="muted">Building explanation…</div>`;
+  let data;
+  try {
+    data = await api("api/rule/explain");
+  } catch (e) {
+    if (explainedRule === rule) {
+      box.innerHTML = `<div class="report-box warn">${escapeHtml(e.message)}</div>`;
+    }
+    return;
+  }
+  if (explainedRule !== rule) return;  // another rule was selected meanwhile
+  box.innerHTML = data.image
+    ? `<img src="${data.image}" alt="${escapeHtml(data.text)}" title="${escapeHtml(data.text)}">`
+    : `<div class="rule-nl">${escapeHtml(data.text || "—")}</div>`;
 }
 
 // ── rule history ────────────────────────────────────────────────────────────
@@ -285,8 +327,9 @@ function renderStructGrid(container, mols, hasRule) {
     const swap = m.label === "pos" ? "→ −" : "→ +";
     const badge = hasRule && m.outcome
       ? `<span class="card-badge badge ${m.outcome}">${m.outcome}</span>` : "";
-    const explain = hasRule && m.prediction === true
-      ? `<button class="explain-btn" data-id="${m.id}" title="Why is this positive?">?</button>` : "";
+    const explain = hasRule && typeof m.prediction === "boolean"
+      ? `<button class="explain-btn ${m.prediction ? "" : "rejected"}" data-id="${m.id}"
+           title="Why does the rule ${m.prediction ? "accept" : "reject"} this molecule?">?</button>` : "";
     const card = document.createElement("div");
     card.className = "struct-card";
     card.draggable = true;
@@ -303,7 +346,7 @@ function renderStructGrid(container, mols, hasRule) {
       <div class="cap" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</div>`;
     card.addEventListener("click", (e) => {
       if (e.target.closest(".card-ctrls")) return;
-      if (e.target.closest(".explain-btn")) { openExplain(m.id, m.name); return; }
+      if (e.target.closest(".explain-btn")) { openExplain(m.id, m.name, m.prediction); return; }
       openModal(m.id);
     });
     container.appendChild(card);
@@ -337,13 +380,10 @@ function confCell(label, n, cls) {
   return `<div class="conf-cell ${cls}"><span class="n">${n}</span><span class="l">${label}</span></div>`;
 }
 
-// ── auxiliary predicates (LLM rules) ────────────────────────────────────────
-// The main hypothesis is shown on its own; the auxiliary predicates it builds on
-// get their own boxes + NL, hidden behind a toggle by default.
-function auxToggleLabel(n, collapsed) {
-  return `${collapsed ? "▸ Show" : "▾ Hide"} ${n} auxiliary predicate${n > 1 ? "s" : ""}`;
-}
-
+// ── auxiliary predicates (logic-program view) ──────────────────────────────
+// The auxiliary predicates the rule defines (LLM rules), as written, each in its own
+// editable box. Only the logic-program view shows them; the explanation panel shows
+// the rule with them unfolded.
 function renderAux(aux) {
   const area = $("aux-area"), list = $("aux-list");
   if (!aux || !aux.length) {
@@ -352,36 +392,58 @@ function renderAux(aux) {
     return;
   }
   area.classList.remove("hidden");
-  $("aux-toggle").textContent = auxToggleLabel(aux.length, list.classList.contains("hidden"));
   // Don't clobber a box the user is currently editing.
   if (list.contains(document.activeElement)) return;
-  list.innerHTML = aux.map((a) => `
+  list.innerHTML = aux.map((a) => {
+    const rows = Math.min(12, Math.max(2, (a.rule || "").split("\n").length));
+    return `
     <div class="aux-item">
       <div class="aux-name mono">${escapeHtml(a.name)}</div>
-      <div class="rule-split">
-        <textarea class="rule-text aux-rule" data-name="${escapeHtml(a.name)}" rows="2">${escapeHtml(a.rule || "")}</textarea>
-        <div class="rule-nl-box">
-          <div class="rule-nl-label">In words</div>
-          <div class="rule-nl">${escapeHtml(a.nl || "—")}</div>
-        </div>
-      </div>
-    </div>`).join("");
+      ${a.description ? `<div class="aux-desc muted">${escapeHtml(a.description)}</div>` : ""}
+      <textarea class="rule-text aux-rule" data-name="${escapeHtml(a.name)}" rows="${rows}">${escapeHtml(a.rule || "")}</textarea>
+    </div>`;
+  }).join("");
 }
 
-$("aux-toggle").onclick = () => {
-  const list = $("aux-list");
-  const collapsed = list.classList.toggle("hidden");
-  $("aux-toggle").textContent =
-    auxToggleLabel(list.querySelectorAll(".aux-item").length, collapsed);
-};
-
-// The full rule sent on apply = the auxiliary definitions plus the main hypothesis
-// compiled from the blocks (the block editor is canonical for the main hypothesis).
-function assembledRule() {
+// The rule as the logic-program view holds it: auxiliary definitions + hypothesis.
+function programRule() {
   const aux = Array.from(document.querySelectorAll(".aux-rule"))
     .map((t) => t.value.trim()).filter(Boolean);
+  return [...aux, $("rule-text").value.trim()].filter(Boolean).join("\n\n");
+}
+
+// The full rule sent on apply. After a block edit: the (unfolded) hypothesis compiled
+// from the blocks plus the auxiliary definitions it still uses; otherwise the logic
+// program as written.
+function assembledRule() {
+  if (editSource !== "blocks") return programRule();
   const main = Blocks.compile().trim();
-  return [...aux, main].filter(Boolean).join("\n\n");
+  const boxes = Array.from(document.querySelectorAll(".aux-rule"))
+    .map((t) => ({ name: t.dataset.name, text: t.value.trim() })).filter((b) => b.text);
+  const refs = (text) => new Set(Array.from(text.matchAll(/\b([a-z]\w*)\s*\(/g), (m) => m[1]));
+  const used = refs(main), keep = new Set();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const b of boxes) {
+      if (!keep.has(b) && used.has(b.name)) {
+        keep.add(b); grew = true;
+        refs(b.text).forEach((r) => used.add(r));
+      }
+    }
+  }
+  return [...boxes.filter((b) => keep.has(b)).map((b) => b.text), main]
+    .filter(Boolean).join("\n\n");
+}
+
+// After a logic-program edit, redraw the blocks from it (unfolded on the server).
+async function blocksFromProgram() {
+  const rule = programRule();
+  try {
+    const data = await api("api/rule/unfold", { rule });
+    // No blocks for it (no concept clause yet, or the server could not unfold it):
+    // keep the last blocks rather than wiping the editor mid-edit.
+    if (data.rule && programRule() === rule && editSource === "program") Blocks.load(data.rule);
+  } catch (e) { /* toast already shown */ }
 }
 
 // ── detail modal ───────────────────────────────────────────────────────────
@@ -451,16 +513,21 @@ $("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") $("modal").classList.add("hidden");
 });
 
-// ── explanation modal (chebILP + xclingo) ──────────────────────────────────
-async function openExplain(id, name) {
-  $("explain-title").textContent = `Why is “${name}” positive?`;
+// ── explanation modal (chebILP) ────────────────────────────────────────────
+// Why the rule accepts a molecule (the match highlighted) or rejects it (the closest
+// match and where it fails). The picture carries the explanation sentence.
+async function openExplain(id, name, accepted) {
+  // The picture's own title says whether and why; this one just names the molecule.
+  $("explain-title").textContent =
+    `${accepted === false ? "Rejected" : "Accepted"} by the rule: “${name}”`;
   $("explain-content").innerHTML = `<div class="muted">Building explanation…</div>`;
   $("explain-modal").classList.remove("hidden");
   try {
     const data = await api(`api/explain?id=${encodeURIComponent(id)}`);
+    $("explain-title").textContent =
+      `${data.fires ? "Accepted" : "Rejected"} by the rule: “${name}”`;
     $("explain-content").innerHTML = `
-      <div class="explain-struct"><img src="${data.image}" alt=""></div>
-      <div class="explain-text">${escapeHtml(data.text)}</div>`;
+      <div class="explain-struct"><img src="${data.image}" alt="${escapeHtml(data.text)}"></div>`;
   } catch (e) {
     $("explain-content").innerHTML = `<div class="report-box warn">${escapeHtml(e.message)}</div>`;
   }
@@ -532,8 +599,22 @@ document.querySelectorAll(".add-mol").forEach((btn) => {
     const data = await api("api/session/add", { text, label });
     input.value = "";
     render(data); toast(data.message);
+    highlightCards(data.highlight);
   };
 });
+
+// Point at existing cards (e.g. a structure that was already among the examples
+// under its ChEBI name), so re-adding it doesn't look like it silently vanished.
+function highlightCards(ids) {
+  (ids || []).forEach((id, i) => {
+    const card = document.querySelector(`.struct-card[data-id="${CSS.escape(id)}"]`);
+    if (!card) return;
+    if (i === 0) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    card.classList.remove("flash");
+    void card.offsetWidth; // restart the animation
+    card.classList.add("flash");
+  });
+}
 
 // ── optimistic relabel / remove ─────────────────────────────────────────────
 // Apply the change to the local state and re-render immediately, then sync with
@@ -795,6 +876,14 @@ $("learn-method").addEventListener("change", () => {
   if ($("learn-method").value !== "llm") $("llm-fresh-btn").classList.add("hidden");
 });
 
+// Learn settings (library predicate kinds), remembered in this browser.
+for (const id of ["use-aux", "use-efg"]) {
+  const saved = localStorage.getItem(`icarus.${id}`);
+  if (saved !== null) $(id).checked = saved === "1";
+  $(id).addEventListener("change", () =>
+    localStorage.setItem(`icarus.${id}`, $(id).checked ? "1" : "0"));
+}
+
 $("learn-btn").onclick = () => startLearn(false);
 // Shown after the LLM method served a cached library rule: really prompt the model.
 $("llm-fresh-btn").onclick = () => startLearn(true);
@@ -811,7 +900,8 @@ async function startLearn(fresh) {
   $("learn-full").textContent = "";
   revealEnd($("learn-progress"));
   try {
-    await api("api/learn", { method, timeout: parseInt($("timeout").value), fresh });
+    await api("api/learn", { method, timeout: parseInt($("timeout").value), fresh,
+                             use_aux: $("use-aux").checked, use_efg: $("use-efg").checked });
   } catch (err) {
     $("learn-status").textContent = "";
     $("learn-btn").disabled = false;
@@ -910,22 +1000,21 @@ $("apply-rule-btn").onclick = async () => {
 // Discard unsaved edits, restoring the selected rule (no new history entry).
 $("revert-rule-btn").onclick = () => {
   editorDirty = false;
+  editSource = null;
   lastRuleSig = null;   // force a reload of the editor from the selected rule
   if (lastState) render(lastState);
   $("change-area").innerHTML = "";
 };
 
-// Aux-predicate text edits mark the rule dirty (main hypothesis edits come through
-// the block editor's onChange). The advanced Prolog box syncs on change (blur).
-$("rule-area").addEventListener("input", (e) => {
-  if (e.target.matches(".aux-rule")) { editorDirty = true; updateEditedFlag(); }
+// Logic-program edits (auxiliary boxes or hypothesis) mark the rule dirty and, once
+// the box loses focus, redraw the blocks from the edited program.
+$("advanced-prolog").addEventListener("input", (e) => {
+  if (e.target.matches(".aux-rule, #rule-text")) {
+    editorDirty = true; editSource = "program"; updateEditedFlag();
+  }
 });
-$("rule-text").addEventListener("input", () => { editorDirty = true; updateEditedFlag(); });
-$("rule-text").addEventListener("change", () => {
-  // Parse hand-edited Prolog back into blocks so the two views stay in sync.
-  Blocks.load($("rule-text").value);
-  editorDirty = true;
-  updateEditedFlag();
+$("advanced-prolog").addEventListener("change", (e) => {
+  if (e.target.matches(".aux-rule, #rule-text")) blocksFromProgram();
 });
 
 // Select a rule from the history — makes it the current, editable rule.
@@ -1033,10 +1122,19 @@ Blocks.init({
   palette: $("block-palette"),
   canvas: $("block-canvas"),
   searchAux: (q, offset) => api(`api/predicates/search?q=${encodeURIComponent(q)}&offset=${offset}`),
+  // Unfold one generated predicate in a block clause. The rule's own auxiliary
+  // definitions go along (an LLM rule's new predicates are not in the library).
+  unfold: (clause, pred) => {
+    const aux = Array.from(document.querySelectorAll(".aux-rule"))
+      .map((t) => t.value.trim()).filter(Boolean);
+    return api("api/rule/unfold", { rule: [...aux, clause].join("\n\n"), pred });
+  },
+  notify: toast,
   onChange: () => {
-    // A block edit: mark dirty and mirror the compiled Prolog into the advanced box.
+    // A block edit: mark dirty and mirror the compiled hypothesis into the logic program.
     editorDirty = true;
-    syncAdvancedFromBlocks();
+    editSource = "blocks";
+    if (document.activeElement !== $("rule-text")) $("rule-text").value = Blocks.compile();
     updateEditedFlag();
   },
 });

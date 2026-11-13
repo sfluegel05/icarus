@@ -132,6 +132,16 @@
                 title="Download every prompt this session sent to the LLM, with the model's answers (Markdown)">Download LLM conversation</button>
       </div>
 
+      <details id="learn-settings" class="learn-settings">
+        <summary>Settings</summary>
+        <div class="muted settings-note">Library predicates the learner may build on, retrieved
+          for the concept definition (half functional groups, half generated predicates).</div>
+        <label class="mini" title="Predicates an LLM generated for earlier concepts (aux_*), taken from the rule library.">
+          <input type="checkbox" id="use-aux" checked> generated predicates (aux)</label>
+        <label class="mini" title="The 583 Extended Functional Groups (efg_*), matched with RDKit.">
+          <input type="checkbox" id="use-efg" checked> functional groups (EFG)</label>
+      </details>
+
       <div id="learn-progress" class="learn-progress hidden">
         <div class="lp-head">
           <span class="lp-title">output</span>
@@ -149,24 +159,26 @@
           <div id="block-palette" class="block-palette"></div>
           <div class="block-main">
             <div id="block-canvas" class="block-canvas"></div>
-            <div class="rule-nl-box">
-              <div class="rule-nl-label">In words</div>
-              <div id="rule-nl" class="rule-nl"></div>
+            <div class="rule-nl-box rule-explain-box">
+              <div class="rule-nl-label">What the rule asks for</div>
+              <div id="rule-explain" class="rule-explain"></div>
             </div>
           </div>
         </div>
 
         <details id="advanced-prolog" class="advanced-prolog">
-          <summary>Advanced: edit as Prolog</summary>
+          <summary>Logic program</summary>
+          <div class="muted adv-hint">The rule as written: the auxiliary predicates it defines,
+            then the hypothesis. The blocks above show it with the auxiliary predicates unfolded;
+            edits here are redrawn there when you click away.</div>
+          <div id="aux-area" class="aux-area hidden">
+            <div class="rule-nl-label">Auxiliary predicates</div>
+            <div id="aux-list" class="aux-list"></div>
+          </div>
+          <div class="rule-nl-label">Hypothesis</div>
           <textarea id="rule-text" rows="4" class="rule-text"
                     placeholder="concept(V0) :- has_atom(V0,V1), n(V1)."></textarea>
-          <div class="muted adv-hint">Edited Prolog is parsed back into blocks when you click away.</div>
         </details>
-
-        <div id="aux-area" class="aux-area hidden">
-          <button id="aux-toggle" class="linkbtn" type="button"></button>
-          <div id="aux-list" class="aux-list hidden"></div>
-        </div>
 
         <div class="row">
           <button id="apply-rule-btn">Apply edited rule</button>
@@ -198,9 +210,9 @@
   </div>
 
   <div id="explain-modal" class="modal hidden">
-    <div class="modal-box">
+    <div class="modal-box explain-box">
       <button id="explain-close" class="modal-close">×</button>
-      <h3 id="explain-title">Why is this positive?</h3>
+      <h3 id="explain-title">Explanation</h3>
       <div id="explain-content">
         <div class="muted">Building explanation…</div>
       </div>

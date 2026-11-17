@@ -21,13 +21,13 @@ import types
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 from viloch.web.api import BadRequest, check_rule_text
 from viloch.web.app import STATIC_DIR as VILOCH_STATIC_DIR
 
-from . import config, data_store, efg, explain, ilp, llm_guard, predicates, render, similarity
+from . import __version__, config, data_store, efg, explain, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
 
 
@@ -189,10 +189,12 @@ def with_session(handler):
 
 
 # ── endpoints ───────────────────────────────────────────────────────────────
-def _page(name: str) -> FileResponse:
+def _page(name: str) -> HTMLResponse:
     # Revalidate like the static files: a heuristically cached old index.html paired
     # with a fresh app.js misses elements the new script expects.
-    return FileResponse(f"{config.WEB_DIR}/{name}", headers={"Cache-Control": "no-cache"})
+    with open(f"{config.WEB_DIR}/{name}", encoding="utf-8") as f:
+        html = f.read().replace("{{version}}", __version__)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 async def index(request: Request):

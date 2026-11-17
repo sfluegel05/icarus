@@ -6,15 +6,10 @@ viloch packages the EFG tables and points chebILP's ``efg`` seed source at them
 """
 
 from viloch.chem.efg import (  # noqa: F401
-    EFG_DESCRIPTIONS_PATH,
-    EFG_PATH,
-    PREFIX,
-    descriptions,
     fact_lines,
     install,
     is_efg,
     referenced,
     retrieval_entries,
     rule_facts,
-    vocabulary,
 )

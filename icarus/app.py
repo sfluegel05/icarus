@@ -298,17 +298,12 @@ async def rule_editor(request: Request, s: Session):
 
 
 def _unfold_one(rule: str, pred: str) -> dict:
-    out = _editor_rule(rule, pred)
-    if out is None:
-        return {"rule": None, "error": f"Could not unfold {pred}."}
-    if not explain.mentions(out, pred):
-        return {"rule": out}
     try:
-        why = explain.unfold_failure(rule, pred)
+        out, error = explain.unfold_pred(rule, pred)
     except Exception:
         traceback.print_exc()
-        why = "its definition could not be read"
-    return {"rule": out, "error": f"Could not unfold {pred}: {why}."}
+        return {"rule": None, "error": f"Could not unfold {pred}."}
+    return {"rule": out, "error": error} if error else {"rule": out}
 
 
 def _client_text(value, what: str = "rule") -> tuple[str, JSONResponse | None]:

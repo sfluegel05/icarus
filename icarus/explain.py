@@ -18,14 +18,12 @@ from __future__ import annotations
 
 import functools
 
-from viloch.api import png_data_url as _png_data_url
+from viloch import api
 from viloch.definition import Definition
-from viloch.definition import mentions as mentions  # noqa: F401  (re-exported)
 from viloch.editor import asp
 from viloch.editor import unfold as _unfold
-from viloch.editor.boxes import explainer_inputs
 
-from . import config, efg, ilp
+from . import config, ilp
 
 TARGET = config.TARGET_LABEL
 
@@ -42,16 +40,8 @@ def definition(rule: str) -> Definition:
     if defn.target != TARGET:  # no concept clause: nothing to explain or edit
         defn = Definition("", defn.aux, TARGET)
     defn = defn.with_descriptions(ilp.library_descriptions())
-    try:  # no library, or predicates it does not define: keep what can be resolved
-        return defn.resolve(config.LLM_LIBRARY_DIR, strict=False)
-    except Exception:
-        return defn
-
-
-def rule_programs(rule: str) -> tuple[str, list[dict]]:
-    """``(hypothesis, aux programs)`` as the explainer takes them."""
-    defn = definition(rule)
-    return defn.rule, defn.programs()
+    # no library, or predicates it does not define: keep what can be resolved
+    return defn.resolve(config.LLM_LIBRARY_DIR, strict=False)
 
 
 # ── the unfolded rule (block editor) ────────────────────────────────────────
@@ -74,39 +64,25 @@ def compile_model(model: dict) -> str:
     return asp.to_asp(model, TARGET)
 
 
-def unfold_failure(rule: str, pred: str) -> str:
-    """Why ``editor_rule(rule, pred)`` left ``pred`` folded, as a phrase for the user."""
-    return _unfold.unfold_failure(definition(rule), pred)
+def unfold_pred(rule: str, pred: str) -> tuple[str, str | None]:
+    """``(rule, error)``: the hypothesis with only ``pred`` unfolded, and why it stayed
+    folded (None if it was unfolded)."""
+    return _unfold.unfold_pred(definition(rule), pred)
 
 
 # ── explanations ────────────────────────────────────────────────────────────
-
-
-def _explainer_inputs(rule: str) -> tuple[str, list[dict]]:
-    """:func:`rule_programs` with each "not" box of the block editor turned back into
-    a negated helper predicate (:func:`viloch.editor.boxes.explainer_inputs`)."""
-    defn = explainer_inputs(definition(rule))
-    return defn.rule, defn.programs()
 
 
 @functools.lru_cache(maxsize=64)
 def explain_rule(rule: str) -> dict:
     """What ``rule`` asks of a molecule: ``{"text", "image" (PNG data URL)}``. Cached
     per rule text: drawing the figure takes a moment."""
-    from viloch.explain.explain import explain_rule as _explain_rule
-
-    efg.install()
-    hypothesis, programs = _explainer_inputs(rule)
-    expl = _explain_rule(hypothesis, aux_programs=programs)
-    return {"text": expl.text, "image": _png_data_url(expl.image)}
+    return api.as_json(api.explain_rule(definition(rule), strict=False))
 
 
 def explain_molecule(mol, rule: str, name: str | None = None) -> dict:
     """Why ``rule`` does or does not accept the molecule (an RDKit mol or SMILES):
     ``{"fires", "text", "image"}`` with the match, or the closest match, highlighted."""
-    from viloch.explain.explain import explain_molecule as _explain_molecule
-
-    efg.install()
-    hypothesis, programs = _explainer_inputs(rule)
-    expl = _explain_molecule(mol, hypothesis, aux_programs=programs, name=name)
-    return {"fires": expl.fires, "text": expl.text, "image": _png_data_url(expl.image)}
+    return api.as_json(
+        api.explain_molecule(mol, definition(rule), strict=False, name=name)
+    )

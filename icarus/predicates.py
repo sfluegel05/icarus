@@ -7,13 +7,9 @@ which library predicates are relevant to the session (``app._class_library_names
 """
 
 from viloch.editor.catalog import (  # noqa: F401
-    COMMON_ELEMENTS,
     aux_blocks,
     aux_index,
-    aux_label,
-    aux_roles,
     catalog,
     efg_blocks,
-    library_roles,
     search_aux_blocks,
 )

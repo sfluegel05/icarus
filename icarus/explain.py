@@ -37,8 +37,6 @@ def definition(rule: str) -> Definition:
     define (transitively). Descriptions missing from the rule's headers come from the
     library."""
     defn = Definition.parse(rule or "", TARGET)
-    if defn.target != TARGET:  # no concept clause: nothing to explain or edit
-        defn = Definition("", defn.aux, TARGET)
     defn = defn.with_descriptions(ilp.library_descriptions())
     # no library, or predicates it does not define: keep what can be resolved
     return defn.resolve(config.LLM_LIBRARY_DIR, strict=False)

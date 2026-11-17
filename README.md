@@ -44,8 +44,10 @@ uv venv --python 3.14 .venv          # or: python3.14 -m venv .venv
 uv pip install -r requirements.txt   # or: .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` covers everything, including chebILP, chebi_utils and Popper
-(pinned to a tested upstream commit). Keep **rdkit** at the pinned version: the
+`requirements.txt` covers everything, including chebILP, viloch (explanations and the
+block editor), chebi_utils and Popper (pinned to a tested upstream commit). To develop
+icarus and viloch together, install a local viloch checkout over it:
+`uv pip install -e ../viloch[web]`. Keep **rdkit** at the pinned version: the
 molecule data file contains pickled RDKit objects, and another version may fail to
 load them.
 
@@ -240,7 +242,7 @@ invite code, remove it from `ICARUS_INVITE_CODES` and restart.
      over name and definition) are evaluated on the session molecules and offered
      as extra body predicates. Half of them are LLM-generated `aux_*` predicates
      from the rule library, half are `efg_*` functional groups (the 583 Extended
-     Functional Groups, matched with RDKit; tables vendored in `icarus/resources/`).
+     Functional Groups, matched with RDKit; the tables ship with viloch).
      The LLM pipeline gets the same split for the predicates it may reuse. Either
      kind can be switched off under **Settings** next to the learn button.
 
@@ -268,14 +270,15 @@ has an oxygen atom").
 | `icarus/session.py` | In-memory sessions, one per browser tab; SMILES/InChI parsing |
 | `icarus/similarity.py` | Fingerprint pool (cached in `data/fingerprints.pkl`) and MMR suggestions |
 | `icarus/ilp.py` | Builds the ILP problem, runs Popper, classifies with clingo, routes learning to a backend (`learn_dispatch`) |
-| `icarus/explain.py` | Rule and molecule explanations (chebILP's explainability pipeline) and the unfolded rule for the block editor |
+| `icarus/explain.py` | Adapter to viloch: rule and molecule explanations, the unfolded rule and its block-editor model |
 | `icarus/aleph.py` | Aleph backend (chebILP `aleph_runner`), renames the learned head to `concept` |
 | `icarus/llm_rulegen.py` | LLM backend: chebILP's `RuleGenerator`, run on the session molecules |
 | `icarus/llm_guard.py` | Rate limits, prompt-size cap, time limit and prompt log around the model call |
-| `icarus/predicates.py` | Building-block catalog for the visual rule editor |
+| `icarus/predicates.py` | Building-block catalog for the visual rule editor (from viloch) |
 | `icarus/render.py` | Server-side SVG structure drawings (RDKit) |
 | `icarus/app.py` | Starlette JSON API and static files |
-| `web/` | Single-page frontend (vanilla JS), tutorial and about pages |
+| `web/` | Single-page frontend (vanilla JS), tutorial and about pages; the block editor (`blocks.js`, `blocks.css`) is served from viloch under `/viloch/` |
+| `tests/` | API tests of the rule editor and explanation endpoints (`pytest tests`) |
 
 ## Limitations
 

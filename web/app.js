@@ -160,7 +160,7 @@ function render(state) {
       $("rule-text").value = parts.main.rule || "";
       editorDirty = false;
       editSource = null;
-      loadEditorBlocks(sig, state.current_rule, parts.main.rule || "");
+      loadEditorBlocks(sig, state.current_rule);
     }
     loadRuleExplanation(state.current_rule);
     renderAux(parts.aux || []);
@@ -180,22 +180,26 @@ let lastRuleSig = null;
 let editorDirty = false;
 let editSource = null;
 
-// The block editor shows the rule with its auxiliary predicates unfolded, which the
-// server computes on request (not in the state: it grounds with clingo). Until it
-// arrives the blocks show the hypothesis as written; a rule without auxiliary
-// predicates needs no request. Results are kept per rule text (revert, reselect).
-const editorRules = new Map();
+// The block editor shows the rule with its auxiliary predicates unfolded, as an
+// editor model the server computes on request (viloch converts ASP <-> blocks; not in
+// the state: unfolding grounds with clingo). Results are kept per rule text (revert,
+// reselect).
+const editorModels = new Map();
 
-async function loadEditorBlocks(sig, rule, hypothesis) {
-  if (!/\baux_/.test(rule || "")) { Blocks.load(hypothesis); return; }
-  if (editorRules.has(rule)) { Blocks.load(editorRules.get(rule)); return; }
-  Blocks.load(hypothesis);
+async function loadEditorBlocks(sig, rule) {
+  if (editorModels.has(rule)) { Blocks.load(editorModels.get(rule)); return; }
   let data;
   try { data = await api("api/rule/editor"); } catch (e) { return; }
-  if (!data.rule || data.source !== rule) return;
-  editorRules.set(rule, data.rule);
+  if (!data.model || data.source !== rule) return;
+  editorModels.set(rule, data.model);
   // Still the same rule, and not edited meanwhile.
-  if (lastRuleSig === sig && editSource === null) Blocks.load(data.rule);
+  if (lastRuleSig === sig && editSource === null) Blocks.load(data.model);
+}
+
+// The concept clauses of the blocks (viloch compiles the model on the server).
+async function compiledBlocks() {
+  const data = await api("api/rule/compile", { model: Blocks.getModel() });
+  return (data.rule || "").trim();
 }
 
 function updateEditedFlag() {
@@ -415,9 +419,9 @@ function programRule() {
 // The full rule sent on apply. After a block edit: the (unfolded) hypothesis compiled
 // from the blocks plus the auxiliary definitions it still uses; otherwise the logic
 // program as written.
-function assembledRule() {
+async function assembledRule() {
   if (editSource !== "blocks") return programRule();
-  const main = Blocks.compile().trim();
+  const main = await compiledBlocks();
   const boxes = Array.from(document.querySelectorAll(".aux-rule"))
     .map((t) => ({ name: t.dataset.name, text: t.value.trim() })).filter((b) => b.text);
   const refs = (text) => new Set(Array.from(text.matchAll(/\b([a-z]\w*)\s*\(/g), (m) => m[1]));
@@ -442,7 +446,7 @@ async function blocksFromProgram() {
     const data = await api("api/rule/unfold", { rule });
     // No blocks for it (no concept clause yet, or the server could not unfold it):
     // keep the last blocks rather than wiping the editor mid-edit.
-    if (data.rule && programRule() === rule && editSource === "program") Blocks.load(data.rule);
+    if (data.model && programRule() === rule && editSource === "program") Blocks.load(data.model);
   } catch (e) { /* toast already shown */ }
 }
 
@@ -985,7 +989,8 @@ $("toggle-log").onclick = () => {
 
 // ── rule editing ─────────────────────────────────────────────────────────────
 $("apply-rule-btn").onclick = async () => {
-  const rule = assembledRule();
+  let rule;
+  try { rule = await assembledRule(); } catch (e) { return; }  // toast already shown
   try {
     const data = await api("api/rule/edit", { rule });
     editorDirty = false;
@@ -1122,27 +1127,42 @@ Blocks.init({
   palette: $("block-palette"),
   canvas: $("block-canvas"),
   searchAux: (q, offset) => api(`api/predicates/search?q=${encodeURIComponent(q)}&offset=${offset}`),
-  // Unfold one generated predicate in a block clause. The rule's own auxiliary
-  // definitions go along (an LLM rule's new predicates are not in the library).
+  // Unfold one generated predicate in a block clause (an editor model). The rule's own
+  // auxiliary definitions go along (an LLM rule's new predicates are not in the library).
   unfold: (clause, pred) => {
     const aux = Array.from(document.querySelectorAll(".aux-rule"))
       .map((t) => t.value.trim()).filter(Boolean);
-    return api("api/rule/unfold", { rule: [...aux, clause].join("\n\n"), pred });
+    return api("api/rule/unfold", { rule: aux.join("\n\n"), model: { clauses: [clause] }, pred });
   },
   notify: toast,
   onChange: () => {
     // A block edit: mark dirty and mirror the compiled hypothesis into the logic program.
     editorDirty = true;
     editSource = "blocks";
-    if (document.activeElement !== $("rule-text")) $("rule-text").value = Blocks.compile();
+    mirrorBlocks();
     updateEditedFlag();
   },
 });
 
+// Mirror the blocks into the logic-program view once edits pause (compiled on the
+// server); a result overtaken by a later edit is dropped.
+let mirrorTimer = null, mirrorSeq = 0;
+function mirrorBlocks() {
+  clearTimeout(mirrorTimer);
+  mirrorTimer = setTimeout(async () => {
+    const seq = ++mirrorSeq;
+    let text;
+    try { text = await compiledBlocks(); } catch (e) { return; }
+    if (seq === mirrorSeq && editSource === "blocks" && document.activeElement !== $("rule-text")) {
+      $("rule-text").value = text;
+    }
+  }, 200);
+}
+
 async function loadPredicates() {
   try {
     const data = await api("api/predicates");
-    Blocks.setCatalog(data.catalog, data.aux, data.target);
+    Blocks.setCatalog(data.catalog, data.aux);
   } catch (e) { /* toast already shown */ }
 }
 

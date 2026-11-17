@@ -19,6 +19,9 @@ import pandas as pd
 
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 from chebILP.preprocessing.chebi.mol_to_fol import build_background_chemlog
+from viloch.definition import clause_head as _clause_head
+from viloch.definition import header_descriptions as rule_aux_descriptions
+from viloch.definition import split_clauses as _split_clauses
 
 from . import config
 
@@ -424,61 +427,6 @@ def classify(rule: str, mols) -> dict[str, bool]:
         raise RuleError(str(e))
     hits = set(positives.get(TARGET, []))
     return {mid: (mid in hits) for mid in ids}
-
-
-_HEAD_RE = re.compile(r"^([a-z_][A-Za-z0-9_]*)\s*\(")
-
-
-def _split_clauses(rule: str) -> list[str]:
-    """Split a program into individual clauses on the ``.`` terminators at bracket
-    depth 0 (so ``.`` inside aggregates/ranges never splits), dropping ``%`` comment
-    lines and collapsing each clause to a single line."""
-    text = "\n".join(l for l in rule.splitlines() if not l.strip().startswith("%"))
-    depth, cur, clauses = 0, [], []
-    for ch in text:
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth = max(0, depth - 1)
-        if ch == "." and depth == 0:
-            c = " ".join("".join(cur).split()).strip()
-            if c:
-                clauses.append(c + ".")
-            cur = []
-        else:
-            cur.append(ch)
-    tail = " ".join("".join(cur).split()).strip()
-    if tail:
-        clauses.append(tail if tail.endswith(".") else tail + ".")
-    return clauses
-
-
-def _clause_head(clause: str) -> str | None:
-    m = _HEAD_RE.match(clause.split(":-", 1)[0].strip())
-    return m.group(1) if m else None
-
-
-_HEADER_RE = re.compile(r"^%\s*(PREDICATE_NAME|DESCRIPTION)\s*:\s*(.+?)\s*$", re.IGNORECASE)
-
-
-def rule_aux_descriptions(rule: str) -> dict[str, str]:
-    """``aux_name -> description`` from the ``% PREDICATE_NAME`` / ``% DESCRIPTION``
-    headers a rule carries for the auxiliary programs it defines (an LLM rule's newly
-    generated predicates are not in the read-only library, only in the rule)."""
-    out, name = {}, None
-    for line in (rule or "").splitlines():
-        m = _HEADER_RE.match(line.strip())
-        if not m:
-            continue
-        if m.group(1).upper() == "PREDICATE_NAME":
-            name = m.group(2)
-        elif name:
-            out[name] = m.group(2)
-            # A header may name the predicate without its aux_ prefix (chebILP writes
-            # the model's name as given); the clauses always carry the prefix.
-            if not name.startswith(("aux_", "efg_")):
-                out.setdefault("aux_" + name, m.group(2))
-    return out
 
 
 def _aux_header(name: str, descriptions: dict[str, str]) -> str:

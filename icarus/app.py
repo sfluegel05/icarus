@@ -24,6 +24,8 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
+from viloch.web.api import BadRequest, check_rule_text
+from viloch.web.app import STATIC_DIR as VILOCH_STATIC_DIR
 
 from . import config, data_store, efg, explain, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
@@ -274,16 +276,25 @@ def _editor_rule(rule: str, only: str | None = None) -> str | None:
         return None
 
 
+def _with_model(data: dict) -> dict:
+    """``data`` plus the block-editor model of its ``rule`` (viloch's ASP -> model)."""
+    rule = data.get("rule")
+    data["model"] = explain.editor_model(rule) if rule else None
+    return data
+
+
 @with_session
 async def rule_editor(request: Request, s: Session):
     """The current rule's hypothesis with its auxiliary predicates unfolded, for the
-    block editor. Not part of the state: unfolding grounds with clingo (and the first
-    call reads the library), which must not run on the event loop under the lock."""
+    block editor (``rule``, and ``model`` for ``Blocks.load``). Not part of the state:
+    unfolding grounds with clingo (and the first call reads the library), which must
+    not run on the event loop under the lock."""
     with s.lock:
         rule = s.current_rule
     if not rule:
-        return JSONResponse({"rule": None, "source": None})
-    return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule), "source": rule})
+        return JSONResponse({"rule": None, "model": None, "source": None})
+    data = {"rule": await run_in_threadpool(_editor_rule, rule), "source": rule}
+    return JSONResponse(await run_in_threadpool(_with_model, data))
 
 
 def _unfold_one(rule: str, pred: str) -> dict:
@@ -300,45 +311,73 @@ def _unfold_one(rule: str, pred: str) -> dict:
     return {"rule": out, "error": f"Could not unfold {pred}: {why}."}
 
 
-# Interval terms ("1..1000000000") outside comments: a one-line way to make clingo
-# ground an enormous program. No library program or learned rule uses them.
-_INTERVAL_RE = re.compile(r"^[^%\n]*(?:\d|[A-Z_]\w*|\))\s*\.\.\s*(?:\d|[A-Z_(-])", re.MULTILINE)
+def _client_text(value, what: str = "rule") -> tuple[str, JSONResponse | None]:
+    """``value`` stripped, or an error response: it must be a string of bounded size
+    without interval terms, since it is grounded with clingo (viloch's check)."""
+    try:
+        return check_rule_text(value, what, max_chars=_MAX_RULE_CHARS), None
+    except BadRequest as e:
+        return "", JSONResponse({"error": str(e)}, status_code=400)
 
 
 def _client_rule(body) -> tuple[str, JSONResponse | None]:
-    """The ``rule`` a client sent, stripped, or an error response: it must be a string
-    of bounded size without interval terms, since it is grounded with clingo."""
-    rule = body.get("rule") if isinstance(body, dict) else None
-    if rule is None:
-        rule = ""
-    if not isinstance(rule, str):
-        return "", JSONResponse({"error": "The rule must be text."}, status_code=400)
-    if len(rule) > _MAX_RULE_CHARS:
-        return "", JSONResponse({"error": f"The rule is too long (at most {_MAX_RULE_CHARS} "
-                                          "characters)."}, status_code=400)
-    if _INTERVAL_RE.search(rule):
-        return "", JSONResponse({"error": "Intervals (a..b) are not supported in rules."},
-                                status_code=400)
-    return rule.strip(), None
+    """The ``rule`` a client sent (see :func:`_client_text`)."""
+    return _client_text(body.get("rule") if isinstance(body, dict) else None)
+
+
+def _client_model(body) -> tuple[dict | None, JSONResponse | None]:
+    model = body.get("model") if isinstance(body, dict) else None
+    if not (isinstance(model, dict) and isinstance(model.get("clauses"), list)
+            and all(isinstance(c, dict) for c in model["clauses"])):
+        return None, JSONResponse({"error": "Bad block-editor model."}, status_code=400)
+    return model, None
+
+
+def _compile(model: dict) -> tuple[str, JSONResponse | None]:
+    try:
+        rule = explain.compile_model(model)
+    except (KeyError, TypeError, AttributeError):
+        return "", JSONResponse({"error": "Bad block-editor model."}, status_code=400)
+    return _client_text(rule)
 
 
 @with_session
 async def rule_unfold(request: Request, s: Session):
     """The block-editor form (auxiliary predicates unfolded) of a rule: one edited in
-    the logic-program view (the client sends the program it would apply), or, with
-    ``pred``, one block-editor clause in which only that generated predicate is to be
-    unfolded (``error`` says why when it stays folded)."""
+    the logic-program view (the client sends the program it would apply, ``rule``),
+    or, with ``pred``, one block-editor clause (``model``, one clause, plus the rule's
+    own auxiliary definitions in ``rule``) in which only that generated predicate is
+    to be unfolded (``error`` says why when it stays folded). Returns ``rule`` and its
+    ``model``."""
     body = await request.json()
     rule, err = _client_rule(body)
     if err:
         return err
+    if isinstance(body, dict) and body.get("model") is not None:
+        model, err = _client_model(body)
+        clause, err = (None, err) if err else _compile(model)
+        if err:
+            return err
+        rule = f"{rule}\n\n{clause}".strip()
     pred = body.get("pred")
     if pred is not None and (not isinstance(pred, str) or not re.fullmatch(r"[a-z]\w{0,200}", pred)):
         return JSONResponse({"error": "Bad predicate name."}, status_code=400)
     rule = await run_in_threadpool(ilp.expand_aux_definitions, rule)
     if pred is not None:
-        return JSONResponse(await run_in_threadpool(_unfold_one, rule, pred))
-    return JSONResponse({"rule": await run_in_threadpool(_editor_rule, rule)})
+        data = await run_in_threadpool(_unfold_one, rule, pred)
+    else:
+        data = {"rule": await run_in_threadpool(_editor_rule, rule)}
+    return JSONResponse(await run_in_threadpool(_with_model, data))
+
+
+async def rule_compile(request: Request):
+    """The ``concept`` clauses of a block-editor ``model`` (viloch's model -> ASP)."""
+    body = await request.json()
+    model, err = _client_model(body)
+    if err:
+        return err
+    rule, err = _compile(model)
+    return err or JSONResponse({"rule": rule})
 
 
 @with_session
@@ -792,6 +831,7 @@ routes = [
     Route("/api/rule/explain", explain_rule),
     Route("/api/rule/unfold", rule_unfold, methods=["POST"]),
     Route("/api/rule/editor", rule_editor),
+    Route("/api/rule/compile", rule_compile, methods=["POST"]),
     Route("/api/state", api_state),
     Route("/api/predicates", api_predicates),
     Route("/api/predicates/search", api_predicates_search),
@@ -862,3 +902,5 @@ class _RevalidatingStaticFiles(StaticFiles):
 
 app = Starlette(routes=routes, lifespan=_lifespan)
 app.mount("/static", _RevalidatingStaticFiles(directory=config.WEB_DIR), name="static")
+# The block editor (blocks.js, blocks.css) comes with viloch.
+app.mount("/viloch", _RevalidatingStaticFiles(directory=VILOCH_STATIC_DIR), name="viloch")

@@ -17,7 +17,7 @@ import os
 import re
 
 from chebILP.aleph_runner import run_ilp_training_aleph
-from chebILP.ilp_problem_builder import build_aleph_background
+from chebILP.ilp_problem import build_aleph_background
 
 from . import config, ilp
 

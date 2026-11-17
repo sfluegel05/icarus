@@ -119,11 +119,11 @@ LLM_LIBRARY_DIR = os.path.join(ICARUS_DATA, "rule_library")
 # name + definition) are grounded on the session molecules and offered as extra
 # body predicates. 0 disables the augmentation.
 ILP_LIBRARY_TOP_N = int(os.environ.get("ICARUS_ILP_LIBRARY_TOP_N", "8"))
-# Offer mol_weight / ring_size facts to the model. Kept OFF so every predicate the
-# model writes grounds against icarus's standard atom-level background (the same
-# bk the classify step builds); otherwise a rule using those facts would silently
-# never fire at inference time.
-LLM_COMPUTED_FACTS = False
+# Offer mol_weight / ring_size facts to the model (as chebILP does by default). The
+# background icarus builds for learning, classify and explain includes them
+# (ilp.computed_facts), so predicates using them — many library ones do — ground
+# the same way at inference time.
+LLM_COMPUTED_FACTS = True
 
 # How the `claude` CLI authenticates (bare model ids only). "subscription" uses the
 # CLI's own login; "api_key" bills ANTHROPIC_API_KEY from the environment / .env

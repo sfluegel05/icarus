@@ -19,12 +19,15 @@ import traceback
 import types
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
+from viloch.web.api import BadRequest, check_rule_text
+from viloch.web.app import STATIC_DIR as VILOCH_STATIC_DIR
 
-from . import config, data_store, ilp, llm_guard, predicates, render, similarity
+from . import __version__, config, data_store, efg, explain, ilp, llm_guard, predicates, render, similarity
 from .session import SESSIONS, Session
 
 
@@ -118,7 +121,9 @@ def state_dict(s: Session) -> dict:
     }
     if s.current_rule:
         out["report"] = _report(s, preds)
-        out["rule_parts"] = ilp.rule_to_nl_parts(s.current_rule)
+        # The logic-program view shows the rule as written; the block editor fetches it
+        # with its auxiliary predicates unfolded from /api/rule/editor.
+        out["rule_parts"] = ilp.rule_parts(s.current_rule)
     return out
 
 
@@ -139,6 +144,9 @@ _MAX_CLASS_EXAMPLES = 100
 _MAX_ADD_LINES = 200
 _MAX_IMPORT_MOLECULES = 1000
 _MAX_IMPORT_RULES = 200
+_MAX_RULE_CHARS = 100_000  # an LLM rule with all its definitions is a few kB
+
+_LABEL_GROUPS = {"pos": "positives", "neg": "negatives", "unlabeled": "unlabeled"}
 
 
 def ok(s: Session, recompute: bool = True, **extra):
@@ -181,10 +189,12 @@ def with_session(handler):
 
 
 # ── endpoints ───────────────────────────────────────────────────────────────
-def _page(name: str) -> FileResponse:
+def _page(name: str) -> HTMLResponse:
     # Revalidate like the static files: a heuristically cached old index.html paired
     # with a fresh app.js misses elements the new script expects.
-    return FileResponse(f"{config.WEB_DIR}/{name}", headers={"Cache-Control": "no-cache"})
+    with open(f"{config.WEB_DIR}/{name}", encoding="utf-8") as f:
+        html = f.read().replace("{{version}}", __version__)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 async def index(request: Request):
@@ -222,27 +232,149 @@ async def depict(request: Request):
 
 
 @with_session
-async def explain(request: Request, s: Session):
-    """Explain why the current rule classifies a session molecule as positive."""
+async def explain_molecule(request: Request, s: Session):
+    """Explain why the current rule does or does not accept a session molecule."""
     mid = request.query_params.get("id", "")
     # Snapshot the molecule + rule under the lock, then run the (slow) explanation
     # outside it so a concurrent reset/remove can't race the read.
     with s.lock:
         m = s.molecules.get(mid)
         rule = s.current_rule
-        smiles = m.smiles if m else None
-        name = m.name if m else None
     if m is None:
         return JSONResponse({"error": "Unknown molecule."}, status_code=404)
     if not rule:
         return JSONResponse({"error": "No rule yet."}, status_code=400)
     try:
-        data = ilp.explain_molecule(smiles, rule)
+        data = await run_in_threadpool(explain.explain_molecule, m.mol, rule, m.name)
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"error": f"Could not build explanation: {e}"}, status_code=500)
-    data["name"] = name
+    data["name"] = m.name
     return JSONResponse(data)
+
+
+@with_session
+async def explain_rule(request: Request, s: Session):
+    """What the current rule asks of a molecule: picture + text, and the rule with its
+    auxiliary predicates unfolded. Fetched separately from the state, which is re-sent
+    after every action, because drawing the picture takes a moment."""
+    with s.lock:
+        rule = s.current_rule
+    if not rule:
+        return JSONResponse({"error": "No rule yet."}, status_code=400)
+    try:
+        data = await run_in_threadpool(explain.explain_rule, rule)
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"error": f"Could not explain the rule: {e}"}, status_code=500)
+    return JSONResponse(data)
+
+
+def _editor_rule(rule: str, only: str | None = None) -> str | None:
+    try:
+        return explain.editor_rule(rule, only)
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _with_model(data: dict) -> dict:
+    """``data`` plus the block-editor model of its ``rule`` (viloch's ASP -> model)."""
+    rule = data.get("rule")
+    data["model"] = explain.editor_model(rule) if rule else None
+    return data
+
+
+@with_session
+async def rule_editor(request: Request, s: Session):
+    """The current rule's hypothesis with its auxiliary predicates unfolded, for the
+    block editor (``rule``, and ``model`` for ``Blocks.load``). Not part of the state:
+    unfolding grounds with clingo (and the first call reads the library), which must
+    not run on the event loop under the lock."""
+    with s.lock:
+        rule = s.current_rule
+    if not rule:
+        return JSONResponse({"rule": None, "model": None, "source": None})
+    data = {"rule": await run_in_threadpool(_editor_rule, rule), "source": rule}
+    return JSONResponse(await run_in_threadpool(_with_model, data))
+
+
+def _unfold_one(rule: str, pred: str) -> dict:
+    try:
+        out, error = explain.unfold_pred(rule, pred)
+    except Exception:
+        traceback.print_exc()
+        return {"rule": None, "error": f"Could not unfold {pred}."}
+    return {"rule": out, "error": error} if error else {"rule": out}
+
+
+def _client_text(value, what: str = "rule") -> tuple[str, JSONResponse | None]:
+    """``value`` stripped, or an error response: it must be a string of bounded size
+    without interval terms, since it is grounded with clingo (viloch's check)."""
+    try:
+        return check_rule_text(value, what, max_chars=_MAX_RULE_CHARS), None
+    except BadRequest as e:
+        return "", JSONResponse({"error": str(e)}, status_code=400)
+
+
+def _client_rule(body) -> tuple[str, JSONResponse | None]:
+    """The ``rule`` a client sent (see :func:`_client_text`)."""
+    return _client_text(body.get("rule") if isinstance(body, dict) else None)
+
+
+def _client_model(body) -> tuple[dict | None, JSONResponse | None]:
+    model = body.get("model") if isinstance(body, dict) else None
+    if not (isinstance(model, dict) and isinstance(model.get("clauses"), list)
+            and all(isinstance(c, dict) for c in model["clauses"])):
+        return None, JSONResponse({"error": "Bad block-editor model."}, status_code=400)
+    return model, None
+
+
+def _compile(model: dict) -> tuple[str, JSONResponse | None]:
+    try:
+        rule = explain.compile_model(model)
+    except (KeyError, TypeError, AttributeError):
+        return "", JSONResponse({"error": "Bad block-editor model."}, status_code=400)
+    return _client_text(rule)
+
+
+@with_session
+async def rule_unfold(request: Request, s: Session):
+    """The block-editor form (auxiliary predicates unfolded) of a rule: one edited in
+    the logic-program view (the client sends the program it would apply, ``rule``),
+    or, with ``pred``, one block-editor clause (``model``, one clause, plus the rule's
+    own auxiliary definitions in ``rule``) in which only that generated predicate is
+    to be unfolded (``error`` says why when it stays folded). Returns ``rule`` and its
+    ``model``."""
+    body = await request.json()
+    rule, err = _client_rule(body)
+    if err:
+        return err
+    if isinstance(body, dict) and body.get("model") is not None:
+        model, err = _client_model(body)
+        clause, err = (None, err) if err else _compile(model)
+        if err:
+            return err
+        rule = f"{rule}\n\n{clause}".strip()
+    pred = body.get("pred")
+    if pred is not None and (not isinstance(pred, str) or not re.fullmatch(r"[a-z]\w{0,200}", pred)):
+        return JSONResponse({"error": "Bad predicate name."}, status_code=400)
+    rule = await run_in_threadpool(ilp.expand_aux_definitions, rule)
+    if pred is not None:
+        data = await run_in_threadpool(_unfold_one, rule, pred)
+    else:
+        data = {"rule": await run_in_threadpool(_editor_rule, rule)}
+    return JSONResponse(await run_in_threadpool(_with_model, data))
+
+
+async def rule_compile(request: Request):
+    """The ``concept`` clauses of a block-editor ``model`` (viloch's model -> ASP)."""
+    body = await request.json()
+    model, err = _client_model(body)
+    if err:
+        return err
+    rule, err = _compile(model)
+    return err or JSONResponse({"rule": rule})
 
 
 @with_session
@@ -251,13 +383,16 @@ async def api_state(request: Request, s: Session):
         return ok(s)  # ok() refreshes predictions when a rule exists
 
 
-def _class_aux_names(concept, rule) -> set[str]:
-    """Library predicates relevant to the session's class: those retrieved for its
-    definition (the same retrieval that augments the ILP background), the class's
+def _class_library_names(concept, rule) -> tuple[set[str], set[str]]:
+    """``(aux names, efg names)`` relevant to the session's class: those retrieved for
+    its definition (the same retrieval that augments the ILP background), the class's
     own generated predicates plus their dependencies, and any used by ``rule``."""
     names = set(re.findall(r"\baux_[A-Za-z0-9_]*", rule or ""))
+    groups = set(efg.referenced(rule or ""))
     try:
-        names |= {p.name for p in ilp.retrieve_library_programs(concept)}
+        programs, retrieved_groups = ilp.retrieve_library_predicates(concept)
+        names |= {p.name for p in programs}
+        groups |= set(retrieved_groups)
     except Exception:
         traceback.print_exc()
     if concept.get("chebi_id"):
@@ -274,7 +409,7 @@ def _class_aux_names(concept, rule) -> set[str]:
             pass
         except Exception:
             traceback.print_exc()
-    return names
+    return names, groups
 
 
 @with_session
@@ -286,11 +421,13 @@ async def api_predicates(request: Request, s: Session):
         concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
                    "definition": s.concept_definition}
         rule = s.current_rule
+    names, groups = _class_library_names(concept, rule)
     return JSONResponse({
         "catalog": predicates.catalog(),
         "aux": _with_class_names(predicates.aux_blocks(
-            config.LLM_LIBRARY_DIR, names=_class_aux_names(concept, rule),
-            rule_descriptions=ilp.rule_aux_descriptions(rule), rule=rule)),
+            config.LLM_LIBRARY_DIR, names=names,
+            rule_descriptions=ilp.rule_aux_descriptions(rule), rule=rule))
+               + predicates.efg_blocks(groups),
         "target": config.TARGET_LABEL,
     })
 
@@ -348,11 +485,20 @@ async def session_add(request: Request, s: Session):
         return JSONResponse({"error": f"At most {_MAX_ADD_LINES} molecules per request."},
                             status_code=400)
     with s.lock:
-        added, errors = s.add_from_text(text, label)
+        added, duplicates, errors = s.add_from_text(text, label)
         msg = f"Added {len(added)} molecule(s)."
+        if duplicates:
+            names = []
+            for m, prev in duplicates[:5]:
+                moved = f" (moved from {_LABEL_GROUPS.get(prev, prev)})" if prev != m.label else ""
+                names.append(f"{m.name}{moved}")
+            more = f" and {len(duplicates) - 5} more" if len(duplicates) > 5 else ""
+            msg += f" Already in the examples: {', '.join(names)}{more}."
         if errors:
             msg += f" Could not parse: {', '.join(errors[:5])}"
-        return ok(s, message=msg)
+        # The client highlights these cards, so a duplicate visibly points at the
+        # existing entry instead of seemingly vanishing.
+        return ok(s, message=msg, highlight=[m.id for m, _ in duplicates])
 
 
 @with_session
@@ -569,7 +715,10 @@ async def learn(request: Request, s: Session):
         pos = s.positives()
         neg = [m for m in s.molecules.values() if m.label == "neg"]
         concept = {"name": s.concept_name, "chebi_id": s.concept_chebi_id,
-                   "definition": s.concept_definition}
+                   "definition": s.concept_definition,
+                   # Settings: which library predicates the learner may build on.
+                   "use_aux": body.get("use_aux") is not False,
+                   "use_efg": body.get("use_efg") is not False}
     if not pos or not neg:
         return JSONResponse(
             {"error": "Need at least one positive and one negative example."}, status_code=400)
@@ -611,11 +760,13 @@ async def learn_progress(request: Request, s: Session):
 @with_session
 async def rule_edit(request: Request, s: Session):
     body = await request.json()
-    new_rule = (body.get("rule") or "").strip()
+    new_rule, err = _client_rule(body)
+    if err:
+        return err
     # A rule that uses a generated (aux_*) predicate carries only the literal; pull in
     # the predicate's definition from the library so it is self-contained and clingo
     # can actually derive it (otherwise it classifies everything negative).
-    new_rule = ilp.expand_aux_definitions(new_rule)
+    new_rule = await run_in_threadpool(ilp.expand_aux_definitions, new_rule)
     with s.lock:
         if not ilp.rule_targets_ok(new_rule):
             return JSONResponse(
@@ -673,7 +824,11 @@ routes = [
     Route("/tutorial", tutorial),
     Route("/about", about),
     Route("/api/depict", depict),
-    Route("/api/explain", explain),
+    Route("/api/explain", explain_molecule),
+    Route("/api/rule/explain", explain_rule),
+    Route("/api/rule/unfold", rule_unfold, methods=["POST"]),
+    Route("/api/rule/editor", rule_editor),
+    Route("/api/rule/compile", rule_compile, methods=["POST"]),
     Route("/api/state", api_state),
     Route("/api/predicates", api_predicates),
     Route("/api/predicates/search", api_predicates_search),
@@ -744,3 +899,5 @@ class _RevalidatingStaticFiles(StaticFiles):
 
 app = Starlette(routes=routes, lifespan=_lifespan)
 app.mount("/static", _RevalidatingStaticFiles(directory=config.WEB_DIR), name="static")
+# The block editor (blocks.js, blocks.css) comes with viloch.
+app.mount("/viloch", _RevalidatingStaticFiles(directory=VILOCH_STATIC_DIR), name="viloch")
